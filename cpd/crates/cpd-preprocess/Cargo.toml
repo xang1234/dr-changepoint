@@ -1,0 +1,16 @@
+[package]
+name = "cpd-preprocess"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[features]
+default = []
+preprocess = ["cpd-core/preprocess"]
+
+[dependencies]
+cpd-core = { path = "../cpd-core" }

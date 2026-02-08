@@ -1,0 +1,27 @@
+[package]
+name = "cpd-bench"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[features]
+default = []
+rayon = ["cpd-offline/rayon"]
+serde = ["cpd-offline/serde"]
+tracing = ["cpd-offline/tracing"]
+simd = ["cpd-offline/simd"]
+kernel = ["cpd-offline/kernel"]
+kernel-approx = ["cpd-offline/kernel-approx"]
+blas = ["cpd-offline/blas"]
+gp = ["cpd-offline/gp"]
+preprocess = ["cpd-offline/preprocess"]
+repro-strict = ["cpd-offline/repro-strict"]
+
+[dependencies]
+cpd-core = { path = "../cpd-core" }
+cpd-costs = { path = "../cpd-costs" }
+cpd-offline = { path = "../cpd-offline" }

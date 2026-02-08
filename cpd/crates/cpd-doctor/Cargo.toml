@@ -1,0 +1,27 @@
+[package]
+name = "cpd-doctor"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[features]
+default = []
+rayon = ["cpd-offline/rayon", "cpd-online/rayon"]
+serde = ["cpd-offline/serde", "cpd-online/serde"]
+tracing = ["cpd-offline/tracing", "cpd-online/tracing"]
+simd = ["cpd-offline/simd", "cpd-online/simd"]
+kernel = ["cpd-offline/kernel", "cpd-online/kernel"]
+kernel-approx = ["cpd-offline/kernel-approx", "cpd-online/kernel-approx"]
+blas = ["cpd-offline/blas", "cpd-online/blas"]
+gp = ["cpd-offline/gp", "cpd-online/gp"]
+preprocess = ["cpd-offline/preprocess", "cpd-online/preprocess"]
+repro-strict = ["cpd-offline/repro-strict", "cpd-online/repro-strict"]
+
+[dependencies]
+cpd-core = { path = "../cpd-core" }
+cpd-offline = { path = "../cpd-offline" }
+cpd-online = { path = "../cpd-online" }

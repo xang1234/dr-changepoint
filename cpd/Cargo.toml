@@ -1,0 +1,42 @@
+[workspace]
+members = [
+  "crates/cpd-core",
+  "crates/cpd-costs",
+  "crates/cpd-preprocess",
+  "crates/cpd-offline",
+  "crates/cpd-online",
+  "crates/cpd-doctor",
+  "crates/cpd-python",
+  "crates/cpd-cli",
+  "crates/cpd-bench",
+  "crates/cpd-eval",
+]
+resolver = "2"
+
+[workspace.package]
+edition = "2024"
+version = "0.1.0"
+license = "MIT OR Apache-2.0"
+authors = ["cpd-rs contributors"]
+rust-version = "1.93"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_docs = "allow"
+
+[workspace.lints.clippy]
+pedantic = "allow"
+
+[workspace.metadata.cpd.features]
+canonical = [
+  "rayon",
+  "serde",
+  "tracing",
+  "simd",
+  "kernel",
+  "kernel-approx",
+  "blas",
+  "gp",
+  "preprocess",
+  "repro-strict",
+]

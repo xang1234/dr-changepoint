@@ -1,0 +1,22 @@
+[package]
+name = "cpd-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[features]
+default = []
+rayon = []
+serde = []
+tracing = []
+simd = []
+kernel = []
+kernel-approx = []
+blas = []
+gp = []
+preprocess = []
+repro-strict = []

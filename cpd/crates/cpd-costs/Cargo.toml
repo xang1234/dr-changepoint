@@ -1,0 +1,25 @@
+[package]
+name = "cpd-costs"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[features]
+default = []
+rayon = ["cpd-core/rayon"]
+serde = ["cpd-core/serde"]
+tracing = ["cpd-core/tracing"]
+simd = ["cpd-core/simd"]
+kernel = ["cpd-core/kernel"]
+kernel-approx = ["cpd-core/kernel-approx"]
+blas = ["cpd-core/blas"]
+gp = ["cpd-core/gp"]
+preprocess = ["cpd-core/preprocess"]
+repro-strict = ["cpd-core/repro-strict"]
+
+[dependencies]
+cpd-core = { path = "../cpd-core" }

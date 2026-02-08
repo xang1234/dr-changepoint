@@ -1,0 +1,28 @@
+[package]
+name = "cpd-python"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[features]
+default = []
+rayon = ["cpd-doctor/rayon"]
+serde = ["cpd-doctor/serde"]
+tracing = ["cpd-doctor/tracing"]
+simd = ["cpd-doctor/simd"]
+kernel = ["cpd-doctor/kernel"]
+kernel-approx = ["cpd-doctor/kernel-approx"]
+blas = ["cpd-doctor/blas"]
+gp = ["cpd-doctor/gp"]
+preprocess = ["cpd-doctor/preprocess"]
+repro-strict = ["cpd-doctor/repro-strict"]
+
+[dependencies]
+cpd-core = { path = "../cpd-core" }
+cpd-offline = { path = "../cpd-offline" }
+cpd-online = { path = "../cpd-online" }
+cpd-doctor = { path = "../cpd-doctor" }
