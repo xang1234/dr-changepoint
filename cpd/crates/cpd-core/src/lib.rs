@@ -4,6 +4,7 @@
 
 pub mod constraints;
 pub mod control;
+pub mod diagnostics;
 pub mod error;
 pub mod execution_context;
 pub mod missing;
@@ -16,6 +17,7 @@ pub use constraints::{
     validate_constraints,
 };
 pub use control::{BudgetMode, BudgetStatus, CancelToken};
+pub use diagnostics::{DIAGNOSTICS_SCHEMA_VERSION, Diagnostics, PruningStats};
 pub use error::CpdError;
 pub use execution_context::ExecutionContext;
 pub use missing::{
