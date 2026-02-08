@@ -1,0 +1,16 @@
+[build-system]
+requires = ["maturin>=1,<2"]
+build-backend = "maturin"
+
+[project]
+name = "cpd-rs"
+dynamic = ["version"]
+requires-python = ">=3.9"
+dependencies = ["numpy>=1.20"]
+
+[tool.maturin]
+bindings = "pyo3"
+manifest-path = "../crates/cpd-python/Cargo.toml"
+module-name = "cpd._cpd_rs"
+python-source = "."
+features = ["extension-module"]

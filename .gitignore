@@ -3,3 +3,12 @@
 
 # Rust workspace build artifacts
 cpd/target/
+
+# Python/maturin build artifacts
+cpd/python/.venv/
+cpd/python/.maturin/
+cpd/python/dist/
+cpd/python/*.egg-info/
+cpd/python/.pytest_cache/
+cpd/python/**/__pycache__/
+cpd/python/cpd/*.so

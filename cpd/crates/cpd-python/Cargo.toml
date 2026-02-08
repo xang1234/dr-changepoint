@@ -6,10 +6,13 @@ license.workspace = true
 rust-version.workspace = true
 
 [lib]
+name = "_cpd_rs"
 path = "src/lib.rs"
+crate-type = ["cdylib"]
 
 [features]
 default = []
+extension-module = ["pyo3/extension-module"]
 rayon = ["cpd-doctor/rayon"]
 serde = ["cpd-doctor/serde"]
 tracing = ["cpd-doctor/tracing"]
@@ -26,3 +29,5 @@ cpd-core = { path = "../cpd-core" }
 cpd-offline = { path = "../cpd-offline" }
 cpd-online = { path = "../cpd-online" }
 cpd-doctor = { path = "../cpd-doctor" }
+pyo3 = { version = "0.22", features = ["abi3-py39", "auto-initialize"] }
+numpy = "0.22"
