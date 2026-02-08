@@ -7,6 +7,7 @@ use crate::constraints::Constraints;
 use crate::control::{BudgetMode, BudgetStatus, CancelToken};
 use crate::observability::{ProgressSink, TelemetrySink};
 use crate::repro::ReproMode;
+use std::time::Instant;
 
 /// Unified execution context passed through detector calls.
 pub struct ExecutionContext<'a> {
@@ -66,8 +67,32 @@ impl<'a> ExecutionContext<'a> {
         self.cancel.is_some_and(CancelToken::is_cancelled)
     }
 
-    /// Checks cost-evaluation budget and reports status based on configured mode.
+    /// Returns a cancelled error when cancellation has been requested.
+    pub fn check_cancelled(&self) -> Result<(), CpdError> {
+        if self.is_cancelled() {
+            return Err(CpdError::cancelled());
+        }
+        Ok(())
+    }
+
+    /// Checks cancellation every `every` iterations.
+    ///
+    /// When `every` is zero, it is treated as one (always poll).
+    pub fn check_cancelled_every(&self, iteration: usize, every: usize) -> Result<(), CpdError> {
+        let every = every.max(1);
+        if iteration % every != 0 {
+            return Ok(());
+        }
+        self.check_cancelled()
+    }
+
+    /// Backwards-compatible wrapper for cost-evaluation budget checks.
     pub fn check_budget(&self, cost_evals: usize) -> Result<BudgetStatus, CpdError> {
+        self.check_cost_eval_budget(cost_evals)
+    }
+
+    /// Checks cost-evaluation budget and reports status based on configured mode.
+    pub fn check_cost_eval_budget(&self, cost_evals: usize) -> Result<BudgetStatus, CpdError> {
         let Some(limit) = self.constraints.max_cost_evals else {
             return Ok(BudgetStatus::WithinBudget);
         };
@@ -79,6 +104,25 @@ impl<'a> ExecutionContext<'a> {
         match self.budget_mode {
             BudgetMode::HardFail => Err(CpdError::resource_limit(format!(
                 "constraints.max_cost_evals exceeded: used={cost_evals}, limit={limit}, budget_mode=HardFail"
+            ))),
+            BudgetMode::SoftDegrade => Ok(BudgetStatus::ExceededSoftDegrade),
+        }
+    }
+
+    /// Checks elapsed time budget and reports status based on configured mode.
+    pub fn check_time_budget(&self, started_at: Instant) -> Result<BudgetStatus, CpdError> {
+        let Some(limit_ms) = self.constraints.time_budget_ms else {
+            return Ok(BudgetStatus::WithinBudget);
+        };
+
+        let elapsed_ms = started_at.elapsed().as_millis();
+        if elapsed_ms <= u128::from(limit_ms) {
+            return Ok(BudgetStatus::WithinBudget);
+        }
+
+        match self.budget_mode {
+            BudgetMode::HardFail => Err(CpdError::resource_limit(format!(
+                "constraints.time_budget_ms exceeded: elapsed_ms={elapsed_ms}, limit_ms={limit_ms}, budget_mode=HardFail"
             ))),
             BudgetMode::SoftDegrade => Ok(BudgetStatus::ExceededSoftDegrade),
         }
@@ -111,6 +155,7 @@ mod tests {
     use crate::observability::{ProgressSink, TelemetrySink};
     use crate::repro::ReproMode;
     use std::sync::Mutex;
+    use std::time::{Duration, Instant};
 
     #[derive(Default)]
     struct MockProgressSink {
@@ -188,11 +233,67 @@ mod tests {
     }
 
     #[test]
-    fn check_budget_with_no_limit_or_within_limit_is_within_budget() {
+    fn check_cancelled_returns_cancelled_error_when_requested() {
+        let constraints = Constraints::default();
+        let cancel = CancelToken::new();
+        let ctx = ExecutionContext::new(&constraints).with_cancel(&cancel);
+
+        assert!(ctx.check_cancelled().is_ok());
+        cancel.cancel();
+
+        let err = ctx
+            .check_cancelled()
+            .expect_err("cancelled token should return an error");
+        assert_eq!(err.to_string(), "cancelled");
+    }
+
+    #[test]
+    fn check_cancelled_every_polls_on_cadence_and_stops_after_cancel() {
+        let constraints = Constraints::default();
+        let cancel = CancelToken::new();
+        let ctx = ExecutionContext::new(&constraints).with_cancel(&cancel);
+
+        for iteration in 0..10 {
+            if iteration == 5 {
+                cancel.cancel();
+            }
+
+            if iteration < 6 {
+                assert!(
+                    ctx.check_cancelled_every(iteration, 2).is_ok(),
+                    "iteration {iteration} should not yet fail"
+                );
+            } else if iteration == 6 {
+                let err = ctx
+                    .check_cancelled_every(iteration, 2)
+                    .expect_err("cancelled state should be observed on cadence");
+                assert_eq!(err.to_string(), "cancelled");
+                break;
+            }
+        }
+    }
+
+    #[test]
+    fn check_cancelled_every_zero_interval_is_treated_as_always_poll() {
+        let constraints = Constraints::default();
+        let cancel = CancelToken::new();
+        let ctx = ExecutionContext::new(&constraints).with_cancel(&cancel);
+
+        cancel.cancel();
+        let err = ctx
+            .check_cancelled_every(3, 0)
+            .expect_err("every=0 should behave like every=1");
+        assert_eq!(err.to_string(), "cancelled");
+    }
+
+    #[test]
+    fn check_cost_eval_budget_with_no_limit_or_within_limit_is_within_budget() {
         let no_limit = Constraints::default();
         let no_limit_ctx = ExecutionContext::new(&no_limit);
         assert_eq!(
-            no_limit_ctx.check_budget(1).expect("no limit must pass"),
+            no_limit_ctx
+                .check_cost_eval_budget(1)
+                .expect("no limit must pass"),
             BudgetStatus::WithinBudget
         );
 
@@ -203,14 +304,14 @@ mod tests {
         let with_limit_ctx = ExecutionContext::new(&with_limit);
         assert_eq!(
             with_limit_ctx
-                .check_budget(10)
+                .check_cost_eval_budget(10)
                 .expect("at limit should pass"),
             BudgetStatus::WithinBudget
         );
     }
 
     #[test]
-    fn check_budget_over_limit_hard_fail_returns_resource_limit_error() {
+    fn check_cost_eval_budget_over_limit_hard_fail_returns_resource_limit_error() {
         let constraints = Constraints {
             max_cost_evals: Some(10),
             ..Constraints::default()
@@ -218,7 +319,7 @@ mod tests {
         let ctx = ExecutionContext::new(&constraints).with_budget_mode(BudgetMode::HardFail);
 
         let err = ctx
-            .check_budget(11)
+            .check_cost_eval_budget(11)
             .expect_err("hard fail should error on budget exceed");
         assert_eq!(
             err.to_string(),
@@ -227,14 +328,77 @@ mod tests {
     }
 
     #[test]
-    fn check_budget_over_limit_soft_degrade_returns_exceeded_status() {
+    fn check_cost_eval_budget_over_limit_soft_degrade_returns_exceeded_status() {
         let constraints = Constraints {
             max_cost_evals: Some(10),
             ..Constraints::default()
         };
         let ctx = ExecutionContext::new(&constraints).with_budget_mode(BudgetMode::SoftDegrade);
         assert_eq!(
-            ctx.check_budget(11).expect("soft mode should not error"),
+            ctx.check_cost_eval_budget(11)
+                .expect("soft mode should not error"),
+            BudgetStatus::ExceededSoftDegrade
+        );
+    }
+
+    #[test]
+    fn check_budget_wrapper_delegates_to_cost_eval_budget() {
+        let constraints = Constraints {
+            max_cost_evals: Some(10),
+            ..Constraints::default()
+        };
+        let ctx = ExecutionContext::new(&constraints).with_budget_mode(BudgetMode::SoftDegrade);
+        assert_eq!(
+            ctx.check_budget(11).expect("wrapper should preserve behavior"),
+            BudgetStatus::ExceededSoftDegrade
+        );
+    }
+
+    #[test]
+    fn check_time_budget_with_no_limit_is_within_budget() {
+        let constraints = Constraints::default();
+        let ctx = ExecutionContext::new(&constraints);
+        assert_eq!(
+            ctx.check_time_budget(Instant::now())
+                .expect("no limit must pass"),
+            BudgetStatus::WithinBudget
+        );
+    }
+
+    #[test]
+    fn check_time_budget_over_limit_hard_fail_returns_resource_limit_error() {
+        let constraints = Constraints {
+            time_budget_ms: Some(1),
+            ..Constraints::default()
+        };
+        let ctx = ExecutionContext::new(&constraints).with_budget_mode(BudgetMode::HardFail);
+        let started_at = Instant::now()
+            .checked_sub(Duration::from_millis(20))
+            .expect("checked_sub should produce a valid earlier instant");
+
+        let err = ctx
+            .check_time_budget(started_at)
+            .expect_err("hard fail should error on time budget exceed");
+        let msg = err.to_string();
+        assert!(msg.contains("constraints.time_budget_ms exceeded"));
+        assert!(msg.contains("limit_ms=1"));
+        assert!(msg.contains("budget_mode=HardFail"));
+    }
+
+    #[test]
+    fn check_time_budget_over_limit_soft_degrade_returns_exceeded_status() {
+        let constraints = Constraints {
+            time_budget_ms: Some(1),
+            ..Constraints::default()
+        };
+        let ctx = ExecutionContext::new(&constraints).with_budget_mode(BudgetMode::SoftDegrade);
+        let started_at = Instant::now()
+            .checked_sub(Duration::from_millis(20))
+            .expect("checked_sub should produce a valid earlier instant");
+
+        assert_eq!(
+            ctx.check_time_budget(started_at)
+                .expect("soft mode should not error"),
             BudgetStatus::ExceededSoftDegrade
         );
     }
