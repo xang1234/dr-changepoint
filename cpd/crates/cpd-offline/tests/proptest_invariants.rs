@@ -357,7 +357,7 @@ proptest! {
     }
 
     #[test]
-    fn binseg_known_k_detection_is_invariant_to_shift_and_scale(
+    fn known_k_detection_is_invariant_to_shift_and_scale_for_pelt_and_binseg(
         shift in -100.0f64..100.0,
         scale in 0.2f64..8.0,
     ) {
@@ -372,47 +372,6 @@ proptest! {
             ..Constraints::default()
         };
         let stopping = Stopping::KnownK(2);
-
-        let binseg_l2_base = binseg_l2_breakpoints(&base, n, 1, &constraints, stopping.clone())
-            .expect("binseg l2 base should succeed");
-        let binseg_l2_shifted =
-            binseg_l2_breakpoints(&shifted, n, 1, &constraints, stopping.clone())
-                .expect("binseg l2 shifted should succeed");
-        let binseg_l2_scaled =
-            binseg_l2_breakpoints(&scaled, n, 1, &constraints, stopping.clone())
-                .expect("binseg l2 scaled should succeed");
-        prop_assert_eq!(&binseg_l2_base, &binseg_l2_shifted);
-        prop_assert_eq!(&binseg_l2_base, &binseg_l2_scaled);
-
-        let binseg_normal_base =
-            binseg_normal_breakpoints(&base, n, 1, &constraints, stopping.clone())
-                .expect("binseg normal base should succeed");
-        let binseg_normal_shifted =
-            binseg_normal_breakpoints(&shifted, n, 1, &constraints, stopping.clone())
-                .expect("binseg normal shifted should succeed");
-        let binseg_normal_scaled =
-            binseg_normal_breakpoints(&scaled, n, 1, &constraints, stopping)
-                .expect("binseg normal scaled should succeed");
-        prop_assert_eq!(&binseg_normal_base, &binseg_normal_shifted);
-        prop_assert_eq!(&binseg_normal_base, &binseg_normal_scaled);
-    }
-
-    #[test]
-    fn penalized_detection_is_invariant_to_shift_and_scale_for_pelt_and_binseg(
-        shift in -100.0f64..100.0,
-        scale in 0.2f64..8.0,
-    ) {
-        let base = three_regime_signal();
-        let n = base.len();
-        let shifted: Vec<f64> = base.iter().map(|value| value + shift).collect();
-        let scaled: Vec<f64> = base.iter().map(|value| value * scale).collect();
-
-        let constraints = Constraints {
-            min_segment_len: 2,
-            max_change_points: Some(2),
-            ..Constraints::default()
-        };
-        let stopping = Stopping::Penalized(Penalty::BIC);
 
         let pelt_l2_base = pelt_l2_breakpoints(&base, n, 1, &constraints, stopping.clone())
             .expect("pelt l2 base should succeed");
@@ -478,17 +437,17 @@ proptest! {
 
         let constraints = Constraints {
             min_segment_len: 2,
+            max_change_points: Some(1),
             ..Constraints::default()
         };
         let stopping_known_k = Stopping::KnownK(1);
-        let stopping_penalized = Stopping::Penalized(Penalty::BIC);
 
         let pelt_l2 = pelt_l2_breakpoints(
             &values,
             n,
             1,
             &constraints,
-            stopping_penalized.clone(),
+            stopping_known_k.clone(),
         )
             .expect("pelt l2 should succeed");
         let pelt_normal = pelt_normal_breakpoints(
@@ -496,7 +455,7 @@ proptest! {
             n,
             1,
             &constraints,
-            stopping_penalized,
+            stopping_known_k.clone(),
         )
         .expect("pelt normal should succeed");
         let binseg_l2 = binseg_l2_breakpoints(
@@ -534,17 +493,17 @@ proptest! {
 
         let constraints = Constraints {
             min_segment_len: 2,
+            max_change_points: Some(2),
             ..Constraints::default()
         };
         let stopping_known_k = Stopping::KnownK(2);
-        let stopping_penalized = Stopping::Penalized(Penalty::BIC);
 
         let pelt_l2_base = pelt_l2_breakpoints(
             &base,
             base_n,
             1,
             &constraints,
-            stopping_penalized.clone(),
+            stopping_known_k.clone(),
         )
         .expect("base pelt l2 should succeed");
         let pelt_l2_replicated =
@@ -553,7 +512,7 @@ proptest! {
                 replicated_n,
                 1,
                 &constraints,
-                stopping_penalized.clone(),
+                stopping_known_k.clone(),
             )
                 .expect("replicated pelt l2 should succeed");
 
@@ -562,7 +521,7 @@ proptest! {
             base_n,
             1,
             &constraints,
-            stopping_penalized.clone(),
+            stopping_known_k.clone(),
         )
         .expect("base pelt normal should succeed");
         let pelt_normal_replicated =
@@ -571,7 +530,7 @@ proptest! {
                 replicated_n,
                 1,
                 &constraints,
-                stopping_penalized,
+                stopping_known_k.clone(),
             )
             .expect("replicated pelt normal should succeed");
 
@@ -605,12 +564,10 @@ proptest! {
             internal_breakpoints(&pelt_l2_replicated),
             scale_breakpoints(internal_breakpoints(&pelt_l2_base), replicate_factor)
         );
-        let expected_pelt_normal =
-            scale_breakpoints(internal_breakpoints(&pelt_normal_base), replicate_factor);
-        let actual_pelt_normal = internal_breakpoints(&pelt_normal_replicated);
-        for expected in expected_pelt_normal {
-            prop_assert!(actual_pelt_normal.contains(&expected));
-        }
+        prop_assert_eq!(
+            internal_breakpoints(&pelt_normal_replicated),
+            scale_breakpoints(internal_breakpoints(&pelt_normal_base), replicate_factor)
+        );
         prop_assert_eq!(
             internal_breakpoints(&binseg_l2_replicated),
             scale_breakpoints(internal_breakpoints(&binseg_l2_base), replicate_factor)
@@ -647,10 +604,10 @@ proptest! {
 
         let constraints = Constraints {
             min_segment_len: 2,
+            max_change_points: Some(2),
             ..Constraints::default()
         };
         let stopping_known_k = Stopping::KnownK(2);
-        let stopping_penalized = Stopping::Penalized(Penalty::BIC);
 
         let pelt_l2_base =
             pelt_l2_breakpoints(
@@ -658,7 +615,7 @@ proptest! {
                 rep_n,
                 d,
                 &constraints,
-                stopping_penalized.clone(),
+                stopping_known_k.clone(),
             )
                 .expect("pelt l2 base should succeed");
         let pelt_l2_perm =
@@ -667,7 +624,7 @@ proptest! {
                 rep_n,
                 d,
                 &constraints,
-                stopping_penalized.clone(),
+                stopping_known_k.clone(),
             )
                 .expect("pelt l2 permuted should succeed");
 
@@ -677,7 +634,7 @@ proptest! {
                 rep_n,
                 d,
                 &constraints,
-                stopping_penalized.clone(),
+                stopping_known_k.clone(),
             )
                 .expect("pelt normal base should succeed");
         let pelt_normal_perm =
@@ -686,7 +643,7 @@ proptest! {
                 rep_n,
                 d,
                 &constraints,
-                stopping_penalized,
+                stopping_known_k.clone(),
             )
                 .expect("pelt normal permuted should succeed");
 

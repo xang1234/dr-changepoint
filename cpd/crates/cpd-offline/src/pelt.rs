@@ -198,6 +198,7 @@ fn run_pelt_penalized<C: CostModel>(
     x: &TimeSeriesView<'_>,
     validated: &ValidatedConstraints,
     beta: f64,
+    prune_candidates: bool,
     cancel_check_every: usize,
     ctx: &ExecutionContext<'_>,
     started_at: Instant,
@@ -303,17 +304,24 @@ fn run_pelt_penalized<C: CostModel>(
         changes[t] = best_changes;
 
         let mut next_candidate_set = Vec::with_capacity(candidate_set.len() + 1);
-        for (idx, &tau) in candidate_set.iter().enumerate() {
-            if let Some((score_no_penalty, _)) = scored[idx] {
-                if score_no_penalty < best_cost {
-                    next_candidate_set.push(tau);
+        if prune_candidates {
+            for (idx, &tau) in candidate_set.iter().enumerate() {
+                if let Some((score_no_penalty, _)) = scored[idx] {
+                    if score_no_penalty < best_cost {
+                        next_candidate_set.push(tau);
+                    } else {
+                        checked_counter_increment(
+                            &mut runtime.candidates_pruned,
+                            "candidates_pruned",
+                        )?;
+                        checked_counter_increment(&mut run_pruned, "run_candidates_pruned")?;
+                    }
                 } else {
-                    checked_counter_increment(&mut runtime.candidates_pruned, "candidates_pruned")?;
-                    checked_counter_increment(&mut run_pruned, "run_candidates_pruned")?;
+                    next_candidate_set.push(tau);
                 }
-            } else {
-                next_candidate_set.push(tau);
             }
+        } else {
+            next_candidate_set.extend_from_slice(&candidate_set);
         }
 
         if t < x.n {
@@ -360,14 +368,21 @@ fn run_known_k_search<C: CostModel>(
         )));
     }
 
+    // KnownK search needs unconstrained cardinality in the inner beta evaluations.
+    // The outer search enforces exact-k, and user-facing max_change_points validation
+    // is still honored via the guard above.
+    let mut search_constraints = validated.clone();
+    search_constraints.max_change_points = None;
+
     let mut iterations = 0usize;
     let mut low_beta = f64::EPSILON;
     let low_kernel = run_pelt_penalized(
         model,
         cache,
         x,
-        validated,
+        &search_constraints,
         low_beta,
+        false,
         cancel_check_every,
         ctx,
         started_at,
@@ -408,8 +423,9 @@ fn run_known_k_search<C: CostModel>(
             model,
             cache,
             x,
-            validated,
+            &search_constraints,
             high_beta,
+            false,
             cancel_check_every,
             ctx,
             started_at,
@@ -442,8 +458,9 @@ fn run_known_k_search<C: CostModel>(
             model,
             cache,
             x,
-            validated,
+            &search_constraints,
             mid_beta,
+            false,
             cancel_check_every,
             ctx,
             started_at,
@@ -510,6 +527,7 @@ impl<C: CostModel> OfflineDetector for Pelt<C> {
                     x,
                     &validated,
                     beta,
+                    true,
                     cancel_check_every,
                     ctx,
                     started_at,
@@ -1073,6 +1091,148 @@ mod tests {
             .expect("known-k should succeed");
         assert_eq!(result.change_points.len(), 2);
         assert_eq!(result.breakpoints, vec![4, 8, 12]);
+    }
+
+    #[test]
+    fn known_k_normal_piecewise_constant_exact_k_is_feasible() {
+        let detector = Pelt::new(
+            CostNormalMeanVar::default(),
+            PeltConfig {
+                stopping: Stopping::KnownK(2),
+                params_per_segment: 3,
+                cancel_check_every: 8,
+            },
+        )
+        .expect("config should be valid");
+
+        let values = vec![
+            -2.0, -2.0, -2.0, -2.0, 6.0, 6.0, 6.0, 6.0, -4.0, -4.0, -4.0, -4.0,
+        ];
+        let view = make_f64_view(
+            &values,
+            values.len(),
+            1,
+            MemoryLayout::CContiguous,
+            MissingPolicy::Error,
+        );
+        let constraints = Constraints {
+            min_segment_len: 2,
+            max_change_points: Some(2),
+            ..Constraints::default()
+        };
+        let ctx = ExecutionContext::new(&constraints);
+        let result = detector
+            .detect(&view, &ctx)
+            .expect("known-k normal should be feasible");
+
+        assert_eq!(result.change_points.len(), 2);
+        assert_eq!(result.breakpoints, vec![4, 8, 12]);
+        assert_strictly_increasing(&result.breakpoints);
+    }
+
+    #[test]
+    fn known_k_normal_with_max_change_points_equal_k_does_not_fail_mid_dp() {
+        let detector = Pelt::new(
+            CostNormalMeanVar::default(),
+            PeltConfig {
+                stopping: Stopping::KnownK(2),
+                params_per_segment: 3,
+                cancel_check_every: 4,
+            },
+        )
+        .expect("config should be valid");
+
+        let values = vec![
+            0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 7.0, 7.0, 7.0, 7.0, 7.0, 7.0, -3.0, -3.0, -3.0, -3.0,
+            -3.0, -3.0,
+        ];
+        let view = make_f64_view(
+            &values,
+            values.len(),
+            1,
+            MemoryLayout::CContiguous,
+            MissingPolicy::Error,
+        );
+        let constraints = Constraints {
+            min_segment_len: 2,
+            max_change_points: Some(2),
+            ..Constraints::default()
+        };
+        let ctx = ExecutionContext::new(&constraints);
+        let result = detector
+            .detect(&view, &ctx)
+            .expect("known-k normal should not fail mid-dp under max_change_points=k");
+
+        assert_eq!(result.change_points.len(), 2);
+        assert_eq!(result.breakpoints, vec![6, 12, 18]);
+        assert_eq!(result.breakpoints.last().copied(), Some(values.len()));
+        assert_strictly_increasing(&result.breakpoints);
+    }
+
+    #[test]
+    fn known_k_normal_replication_keeps_scaled_breakpoints() {
+        let detector = Pelt::new(
+            CostNormalMeanVar::default(),
+            PeltConfig {
+                stopping: Stopping::KnownK(2),
+                params_per_segment: 3,
+                cancel_check_every: 8,
+            },
+        )
+        .expect("config should be valid");
+
+        let base = vec![
+            -1.0, -1.0, -1.0, -1.0, -1.0, -1.0, 5.0, 5.0, 5.0, 5.0, 5.0, 5.0, -2.0, -2.0, -2.0,
+            -2.0, -2.0, -2.0,
+        ];
+        let replicate_factor = 3usize;
+        let mut replicated = Vec::with_capacity(base.len() * replicate_factor);
+        for &value in &base {
+            replicated.extend(std::iter::repeat_n(value, replicate_factor));
+        }
+
+        let constraints = Constraints {
+            min_segment_len: 2,
+            max_change_points: Some(2),
+            ..Constraints::default()
+        };
+        let ctx = ExecutionContext::new(&constraints);
+
+        let base_view = make_f64_view(
+            &base,
+            base.len(),
+            1,
+            MemoryLayout::CContiguous,
+            MissingPolicy::Error,
+        );
+        let replicated_view = make_f64_view(
+            &replicated,
+            replicated.len(),
+            1,
+            MemoryLayout::CContiguous,
+            MissingPolicy::Error,
+        );
+
+        let base_result = detector
+            .detect(&base_view, &ctx)
+            .expect("base known-k normal should succeed");
+        let replicated_result = detector
+            .detect(&replicated_view, &ctx)
+            .expect("replicated known-k normal should succeed");
+
+        let scaled_change_points: Vec<usize> = base_result
+            .change_points
+            .iter()
+            .map(|cp| cp * replicate_factor)
+            .collect();
+
+        assert_eq!(base_result.change_points.len(), 2);
+        assert_eq!(replicated_result.change_points.len(), 2);
+        assert_eq!(replicated_result.change_points, scaled_change_points);
+        assert_eq!(
+            replicated_result.breakpoints.last().copied(),
+            Some(replicated.len())
+        );
     }
 
     #[test]
