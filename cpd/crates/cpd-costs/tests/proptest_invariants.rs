@@ -2,7 +2,9 @@
 
 #![forbid(unsafe_code)]
 
-use cpd_core::{CachePolicy, MemoryLayout, MissingPolicy, ReproMode, TimeIndex, TimeSeriesView};
+use cpd_core::{
+    CachePolicy, CpdError, MemoryLayout, MissingPolicy, ReproMode, TimeIndex, TimeSeriesView,
+};
 use cpd_costs::{CostL2Mean, CostModel, CostNormalMeanVar};
 use proptest::prelude::*;
 use proptest::test_runner::{Config as ProptestConfig, FileFailurePersistence};
@@ -10,18 +12,36 @@ use proptest::test_runner::{Config as ProptestConfig, FileFailurePersistence};
 const ABS_TOL: f64 = 1e-7;
 const REL_TOL: f64 = 1e-6;
 const VAR_FLOOR: f64 = f64::EPSILON * 1e6;
+const MIN_PROPTEST_CASES: u32 = 1000;
 
-fn make_univariate_view(values: &[f64]) -> TimeSeriesView<'_> {
+fn proptest_cases() -> u32 {
+    std::env::var("PROPTEST_CASES")
+        .ok()
+        .and_then(|raw| raw.parse::<u32>().ok())
+        .map(|parsed| parsed.max(MIN_PROPTEST_CASES))
+        .unwrap_or(MIN_PROPTEST_CASES)
+}
+
+fn make_f64_view(
+    values: &[f64],
+    n: usize,
+    d: usize,
+    missing: MissingPolicy,
+) -> Result<TimeSeriesView<'_>, CpdError> {
     TimeSeriesView::from_f64(
         values,
-        values.len(),
-        1,
+        n,
+        d,
         MemoryLayout::CContiguous,
         None,
         TimeIndex::None,
-        MissingPolicy::Error,
+        missing,
     )
-    .expect("generated test data should always form a valid TimeSeriesView")
+}
+
+fn make_univariate_view(values: &[f64]) -> TimeSeriesView<'_> {
+    make_f64_view(values, values.len(), 1, MissingPolicy::Error)
+        .expect("generated test data should always form a valid TimeSeriesView")
 }
 
 fn relative_close(actual: f64, expected: f64) -> bool {
@@ -65,9 +85,157 @@ fn naive_normal(values: &[f64], start: usize, end: usize) -> f64 {
     len * var.ln()
 }
 
+fn l2_segment_cost(values: &[f64], n: usize, d: usize, start: usize, end: usize) -> f64 {
+    let view = make_f64_view(values, n, d, MissingPolicy::Error).expect("view should be valid");
+    let model = CostL2Mean::new(ReproMode::Balanced);
+    let cache = model
+        .precompute(&view, &CachePolicy::Full)
+        .expect("precompute should succeed for valid data");
+    model.segment_cost(&cache, start, end)
+}
+
+fn normal_segment_cost(values: &[f64], n: usize, d: usize, start: usize, end: usize) -> f64 {
+    let view = make_f64_view(values, n, d, MissingPolicy::Error).expect("view should be valid");
+    let model = CostNormalMeanVar::new(ReproMode::Balanced);
+    let cache = model
+        .precompute(&view, &CachePolicy::Full)
+        .expect("precompute should succeed for valid data");
+    model.segment_cost(&cache, start, end)
+}
+
+fn permute_columns(values: &[f64], n: usize, d: usize, permutation: &[usize]) -> Vec<f64> {
+    assert_eq!(permutation.len(), d);
+    let mut out = vec![0.0; values.len()];
+    for t in 0..n {
+        for (new_dim, &old_dim) in permutation.iter().enumerate() {
+            out[t * d + new_dim] = values[t * d + old_dim];
+        }
+    }
+    out
+}
+
+fn stress_signal(case_id: u8, n: usize) -> Vec<f64> {
+    match case_id % 4 {
+        0 => (0..n)
+            .map(|idx| {
+                let sign = if idx % 2 == 0 { 1.0 } else { -1.0 };
+                sign * 1.0e15 + idx as f64 * 1.0e3
+            })
+            .collect(),
+        1 => {
+            let center = (n as f64 - 1.0) * 0.5;
+            (0..n)
+                .map(|idx| ((idx as f64) - center) * 1.0e-15)
+                .collect()
+        }
+        2 => {
+            let denormal = f64::from_bits(1);
+            (0..n)
+                .map(|idx| {
+                    let sign = if idx % 2 == 0 { 1.0 } else { -1.0 };
+                    sign * denormal * (idx as f64 + 1.0)
+                })
+                .collect()
+        }
+        _ => {
+            let base = 42.0;
+            (0..n).map(|idx| base + idx as f64 * 1.0e-12).collect()
+        }
+    }
+}
+
+fn univariate_segment_case_strategy(
+    min_segment_len: usize,
+) -> impl Strategy<Value = (Vec<f64>, usize, usize)> {
+    prop::collection::vec(-1_000.0f64..1_000.0, 8..96).prop_flat_map(move |values| {
+        let n = values.len();
+        (0usize..=(n - min_segment_len)).prop_flat_map(move |start| {
+            let values_for_start = values.clone();
+            ((start + min_segment_len)..=n)
+                .prop_map(move |end| (values_for_start.clone(), start, end))
+        })
+    })
+}
+
+fn stress_segment_case_strategy(
+    min_segment_len: usize,
+) -> impl Strategy<Value = (usize, u8, usize, usize)> {
+    (8usize..96, 0u8..4).prop_flat_map(move |(n, case_id)| {
+        (0usize..=(n - min_segment_len)).prop_flat_map(move |start| {
+            ((start + min_segment_len)..=n).prop_map(move |end| (n, case_id, start, end))
+        })
+    })
+}
+
+fn multivariate_permutation_case_strategy()
+-> impl Strategy<Value = (usize, usize, Vec<f64>, usize, usize, usize, usize)> {
+    (8usize..64, 2usize..6).prop_flat_map(|(n, d)| {
+        (
+            Just(n),
+            Just(d),
+            prop::collection::vec(-500.0f64..500.0, n * d),
+            0usize..(n - 1),
+            0usize..d,
+            0usize..(d - 1),
+        )
+            .prop_flat_map(|(n, d, values, start, left_col, right_offset)| {
+                let right_col = if right_offset >= left_col {
+                    right_offset + 1
+                } else {
+                    right_offset
+                };
+                ((start + 2)..=n)
+                    .prop_map(move |end| (n, d, values.clone(), start, end, left_col, right_col))
+            })
+    })
+}
+
+#[test]
+fn nan_with_missing_policy_error_returns_invalid_input() {
+    let values = [1.0_f64, f64::NAN, 3.0, 4.0];
+    let err = make_f64_view(&values, 2, 2, MissingPolicy::Error)
+        .expect_err("NaN + MissingPolicy::Error should fail");
+    assert!(matches!(err, CpdError::InvalidInput(_)));
+}
+
+#[test]
+fn infinities_are_rejected_at_timeseries_boundary() {
+    let policies = [
+        MissingPolicy::Error,
+        MissingPolicy::ImputeZero,
+        MissingPolicy::ImputeLast,
+        MissingPolicy::Ignore,
+    ];
+
+    for policy in policies {
+        let plus_inf = [1.0_f64, f64::INFINITY, 3.0, 4.0];
+        let plus_err = make_f64_view(&plus_inf, 2, 2, policy)
+            .expect_err("+inf should be rejected for every missing policy");
+        assert!(matches!(plus_err, CpdError::InvalidInput(_)));
+
+        let minus_inf = [1.0_f64, f64::NEG_INFINITY, 3.0, 4.0];
+        let minus_err = make_f64_view(&minus_inf, 2, 2, policy)
+            .expect_err("-inf should be rejected for every missing policy");
+        assert!(matches!(minus_err, CpdError::InvalidInput(_)));
+
+        let plus_inf_f32 = [1.0_f32, f32::INFINITY, 3.0, 4.0];
+        let plus_err_f32 = TimeSeriesView::from_f32(
+            &plus_inf_f32,
+            2,
+            2,
+            MemoryLayout::CContiguous,
+            None,
+            TimeIndex::None,
+            policy,
+        )
+        .expect_err("+inf f32 should be rejected for every missing policy");
+        assert!(matches!(plus_err_f32, CpdError::InvalidInput(_)));
+    }
+}
+
 proptest! {
     #![proptest_config(ProptestConfig {
-        cases: 256,
+        cases: proptest_cases(),
         max_shrink_iters: 1024,
         failure_persistence: Some(Box::new(FileFailurePersistence::Direct("proptest-regressions/tests/proptest_invariants.txt"))),
         .. ProptestConfig::default()
@@ -75,15 +243,8 @@ proptest! {
 
     #[test]
     fn l2_segment_cost_is_non_negative_deterministic_and_matches_naive(
-        values in prop::collection::vec(-1_000.0f64..1_000.0, 8..96),
-        start in 0usize..96,
-        len in 1usize..48,
+        (values, start, end) in univariate_segment_case_strategy(1),
     ) {
-        let n = values.len();
-        prop_assume!(start < n);
-        let end = start.saturating_add(len).min(n);
-        prop_assume!(start < end);
-
         let view = make_univariate_view(&values);
         let model = CostL2Mean::new(ReproMode::Balanced);
         let cache = model
@@ -101,15 +262,8 @@ proptest! {
 
     #[test]
     fn normal_segment_cost_is_deterministic_and_matches_naive(
-        values in prop::collection::vec(-1_000.0f64..1_000.0, 8..96),
-        start in 0usize..96,
-        len in 2usize..48,
+        (values, start, end) in univariate_segment_case_strategy(2),
     ) {
-        let n = values.len();
-        prop_assume!(start < n);
-        let end = start.saturating_add(len).min(n);
-        prop_assume!(start + 1 < end);
-
         let view = make_univariate_view(&values);
         let model = CostNormalMeanVar::new(ReproMode::Balanced);
         let cache = model
@@ -126,16 +280,9 @@ proptest! {
 
     #[test]
     fn l2_segment_cost_is_shift_invariant(
-        values in prop::collection::vec(-1_000.0f64..1_000.0, 8..96),
+        (values, start, end) in univariate_segment_case_strategy(1),
         shift in -500.0f64..500.0,
-        start in 0usize..96,
-        len in 1usize..48,
     ) {
-        let n = values.len();
-        prop_assume!(start < n);
-        let end = start.saturating_add(len).min(n);
-        prop_assume!(start < end);
-
         let shifted: Vec<f64> = values.iter().map(|value| value + shift).collect();
 
         let base_view = make_univariate_view(&values);
@@ -153,5 +300,91 @@ proptest! {
         let shifted_cost = model.segment_cost(&shifted_cache, start, end);
 
         prop_assert!(relative_close(base_cost, shifted_cost));
+    }
+
+    #[test]
+    fn l2_segment_cost_obeys_scale_equivariance_under_affine_transform(
+        (values, start, end) in univariate_segment_case_strategy(1),
+        shift in -500.0f64..500.0,
+        scale in prop_oneof![-8.0f64..-0.2, 0.2f64..8.0],
+    ) {
+        let n = values.len();
+
+        let transformed: Vec<f64> = values
+            .iter()
+            .map(|value| scale * value + shift)
+            .collect();
+
+        let base_cost = l2_segment_cost(&values, n, 1, start, end);
+        let transformed_cost = l2_segment_cost(&transformed, n, 1, start, end);
+        let expected = base_cost * scale * scale;
+
+        prop_assert!(relative_close(transformed_cost, expected));
+    }
+
+    #[test]
+    fn normal_segment_cost_is_shift_invariant(
+        (values, start, end) in univariate_segment_case_strategy(2),
+        shift in -500.0f64..500.0,
+    ) {
+        let n = values.len();
+
+        let shifted: Vec<f64> = values.iter().map(|value| value + shift).collect();
+
+        let base_cost = normal_segment_cost(&values, n, 1, start, end);
+        let shifted_cost = normal_segment_cost(&shifted, n, 1, start, end);
+
+        prop_assert!(relative_close(base_cost, shifted_cost));
+    }
+
+    #[test]
+    fn normal_segment_cost_tracks_scale_law_under_affine_transform(
+        (values, start, end) in univariate_segment_case_strategy(2),
+        shift in -500.0f64..500.0,
+        scale in prop_oneof![-8.0f64..-0.2, 0.2f64..8.0],
+    ) {
+        let n = values.len();
+
+        let transformed: Vec<f64> = values
+            .iter()
+            .map(|value| scale * value + shift)
+            .collect();
+
+        let base_cost = normal_segment_cost(&values, n, 1, start, end);
+        let transformed_cost = normal_segment_cost(&transformed, n, 1, start, end);
+        let segment_len = (end - start) as f64;
+        let expected = base_cost + 2.0 * segment_len * scale.abs().ln();
+
+        prop_assert!(relative_close(transformed_cost, expected));
+    }
+
+    #[test]
+    fn multivariate_column_permutation_preserves_l2_and_normal_costs(
+        (n, d, values, start, end, left_col, right_col) in multivariate_permutation_case_strategy(),
+    ) {
+        let mut permutation: Vec<usize> = (0..d).collect();
+        permutation.swap(left_col, right_col);
+        let permuted = permute_columns(&values, n, d, &permutation);
+
+        let l2_base = l2_segment_cost(&values, n, d, start, end);
+        let l2_permuted = l2_segment_cost(&permuted, n, d, start, end);
+        let normal_base = normal_segment_cost(&values, n, d, start, end);
+        let normal_permuted = normal_segment_cost(&permuted, n, d, start, end);
+
+        prop_assert!(relative_close(l2_base, l2_permuted));
+        prop_assert!(relative_close(normal_base, normal_permuted));
+    }
+
+    #[test]
+    fn numerical_stress_inputs_produce_finite_costs(
+        (n, case_id, start, end) in stress_segment_case_strategy(2),
+    ) {
+        let values = stress_signal(case_id, n);
+        let l2_cost = l2_segment_cost(&values, n, 1, start, end);
+        let normal_cost = normal_segment_cost(&values, n, 1, start, end);
+
+        prop_assert!(l2_cost.is_finite());
+        prop_assert!(l2_cost >= -ABS_TOL);
+        prop_assert!(normal_cost.is_finite());
     }
 }

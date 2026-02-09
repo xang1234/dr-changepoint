@@ -103,6 +103,33 @@ fn effective_missing_stats(
     }
 }
 
+fn first_infinite_position(values: DTypeView<'_>) -> Option<(usize, &'static str)> {
+    match values {
+        DTypeView::F32(slice) => slice.iter().enumerate().find_map(|(idx, value)| {
+            if value.is_infinite() {
+                if value.is_sign_positive() {
+                    Some((idx, "+inf"))
+                } else {
+                    Some((idx, "-inf"))
+                }
+            } else {
+                None
+            }
+        }),
+        DTypeView::F64(slice) => slice.iter().enumerate().find_map(|(idx, value)| {
+            if value.is_infinite() {
+                if value.is_sign_positive() {
+                    Some((idx, "+inf"))
+                } else {
+                    Some((idx, "-inf"))
+                }
+            } else {
+                None
+            }
+        }),
+    }
+}
+
 impl<'a> TimeSeriesView<'a> {
     /// Constructs a validated `TimeSeriesView`.
     pub fn new(
@@ -132,6 +159,12 @@ impl<'a> TimeSeriesView<'a> {
         if value_len != expected_len {
             return Err(CpdError::invalid_input(format!(
                 "value length mismatch: got {value_len}, expected {expected_len} (n={n}, d={d})"
+            )));
+        }
+
+        if let Some((idx, kind)) = first_infinite_position(values) {
+            return Err(CpdError::invalid_input(format!(
+                "non-finite value encountered: index={idx}, value={kind}; TimeSeriesView does not accept infinities"
             )));
         }
 
@@ -891,6 +924,50 @@ mod tests {
 
             assert_eq!(view.n_missing(), 2);
             assert!(view.has_missing());
+        }
+    }
+
+    #[test]
+    fn rejects_infinity_for_all_missing_policies() {
+        let policies = [
+            MissingPolicy::Error,
+            MissingPolicy::ImputeZero,
+            MissingPolicy::ImputeLast,
+            MissingPolicy::Ignore,
+        ];
+
+        let plus_inf = [1.0_f64, f64::INFINITY, 3.0, 4.0];
+        for policy in policies {
+            let err = TimeSeriesView::from_f64(
+                &plus_inf,
+                2,
+                2,
+                MemoryLayout::CContiguous,
+                None,
+                TimeIndex::None,
+                policy,
+            )
+            .expect_err("all policies must reject +inf");
+            let msg = err.to_string();
+            assert!(msg.contains("non-finite value"));
+            assert!(msg.contains("value=+inf"));
+        }
+
+        let minus_inf = [1.0_f64, f64::NEG_INFINITY, 3.0, 4.0];
+        for policy in policies {
+            let err = TimeSeriesView::from_f64(
+                &minus_inf,
+                2,
+                2,
+                MemoryLayout::CContiguous,
+                None,
+                TimeIndex::None,
+                policy,
+            )
+            .expect_err("all policies must reject -inf");
+            let msg = err.to_string();
+            assert!(msg.contains("non-finite value"));
+            assert!(msg.contains("value=-inf"));
         }
     }
 
