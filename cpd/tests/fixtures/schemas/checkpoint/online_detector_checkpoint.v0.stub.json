@@ -1,0 +1,18 @@
+{
+  "schema_version": 0,
+  "detector_id": "bocpd",
+  "engine_version": "0.1.0",
+  "created_at_ns": 1738886400000000000,
+  "payload_codec": "json",
+  "payload_crc32": "1a2b3c4d",
+  "payload": {
+    "state": {
+      "run_length_posterior": [
+        0.0
+      ]
+    },
+    "metadata": {
+      "checkpoint_reason": "schema_stub_fixture"
+    }
+  }
+}

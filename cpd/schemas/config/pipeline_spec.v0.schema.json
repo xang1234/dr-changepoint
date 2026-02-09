@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cpd-rs.dev/schemas/config/pipeline_spec.v0.schema.json",
+  "title": "PipelineSpec (Provisional) v0",
+  "description": "Provisional stub schema. This envelope is versioned now and will be tightened when PipelineSpec is implemented.",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "kind",
+    "payload"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 0
+    },
+    "kind": {
+      "const": "pipeline_spec"
+    },
+    "payload": {
+      "type": "object",
+      "additionalProperties": true
+    }
+  },
+  "additionalProperties": true
+}

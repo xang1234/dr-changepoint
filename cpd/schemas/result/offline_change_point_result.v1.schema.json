@@ -1,0 +1,234 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cpd-rs.dev/schemas/result/offline_change_point_result.v1.schema.json",
+  "title": "OfflineChangePointResult v1",
+  "type": "object",
+  "required": [
+    "breakpoints",
+    "change_points",
+    "diagnostics"
+  ],
+  "properties": {
+    "breakpoints": {
+      "type": "array",
+      "items": {
+        "type": "integer",
+        "minimum": 0
+      }
+    },
+    "change_points": {
+      "type": "array",
+      "items": {
+        "type": "integer",
+        "minimum": 0
+      }
+    },
+    "scores": {
+      "type": [
+        "array",
+        "null"
+      ],
+      "items": {
+        "type": "number"
+      }
+    },
+    "segments": {
+      "type": [
+        "array",
+        "null"
+      ],
+      "items": {
+        "$ref": "#/$defs/segmentStats"
+      }
+    },
+    "diagnostics": {
+      "$ref": "#/$defs/diagnostics"
+    }
+  },
+  "additionalProperties": true,
+  "$defs": {
+    "segmentStats": {
+      "type": "object",
+      "required": [
+        "start",
+        "end",
+        "count",
+        "missing_count"
+      ],
+      "properties": {
+        "start": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "end": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "mean": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "number"
+          }
+        },
+        "variance": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "number"
+          }
+        },
+        "count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "missing_count": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": true
+    },
+    "pruningStats": {
+      "type": "object",
+      "required": [
+        "candidates_considered",
+        "candidates_pruned"
+      ],
+      "properties": {
+        "candidates_considered": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "candidates_pruned": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": true
+    },
+    "diagnostics": {
+      "type": "object",
+      "required": [
+        "n",
+        "d",
+        "schema_version",
+        "algorithm",
+        "cost_model",
+        "repro_mode"
+      ],
+      "properties": {
+        "n": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "d": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "schema_version": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "engine_version": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "runtime_ms": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "notes": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "warnings": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "algorithm": {
+          "type": "string"
+        },
+        "cost_model": {
+          "type": "string"
+        },
+        "seed": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "repro_mode": {
+          "type": "string"
+        },
+        "thread_count": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "blas_backend": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "cpu_features": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          }
+        },
+        "params_json": {},
+        "pruning_stats": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/pruningStats"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "missing_policy_applied": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "missing_fraction": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "effective_sample_count": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        }
+      },
+      "additionalProperties": true
+    }
+  }
+}

@@ -1,0 +1,17 @@
+{
+  "schema_version": 0,
+  "kind": "pipeline_spec",
+  "payload": {
+    "detector": "pelt",
+    "cost": "l2",
+    "constraints": {
+      "min_segment_len": 2
+    },
+    "stopping": {
+      "n_bkps": 2
+    }
+  },
+  "notes": [
+    "Provisional fixture for schema governance."
+  ]
+}

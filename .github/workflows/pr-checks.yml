@@ -155,6 +155,9 @@ jobs:
       - name: Unit test CI gate scripts
         run: python3 -m unittest discover -s ../.github/scripts/tests -p 'test_*.py'
 
+      - name: Validate schema and fixture contracts
+        run: python3 ../.github/scripts/schema_gate.py
+
       - name: Install cargo-audit
         run: cargo install --locked cargo-audit
 

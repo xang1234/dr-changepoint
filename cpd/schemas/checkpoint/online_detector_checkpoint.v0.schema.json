@@ -1,0 +1,46 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cpd-rs.dev/schemas/checkpoint/online_detector_checkpoint.v0.schema.json",
+  "title": "OnlineDetectorCheckpoint (Provisional) v0",
+  "description": "Provisional checkpoint envelope schema for compatibility governance. Runtime checkpoint serialization will tighten this contract in a follow-up issue.",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "detector_id",
+    "engine_version",
+    "created_at_ns",
+    "payload_codec",
+    "payload_crc32",
+    "payload"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 0
+    },
+    "detector_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "engine_version": {
+      "type": "string",
+      "minLength": 1
+    },
+    "created_at_ns": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "payload_codec": {
+      "type": "string",
+      "minLength": 1
+    },
+    "payload_crc32": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}$"
+    },
+    "payload": {
+      "type": "object",
+      "additionalProperties": true
+    }
+  },
+  "additionalProperties": true
+}

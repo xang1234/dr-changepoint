@@ -89,4 +89,4 @@ Fix: rebuild via `maturin develop --release` in the active environment.
 - `detect_offline(x, detector, cost, constraints, stopping, repro_mode, return_diagnostics)`
 - `OfflineChangePointResult`
   - fields: `breakpoints`, `change_points`, `scores`, `segments`, `diagnostics`
-  - helpers: `to_json()`, `from_json(...)`
+  - helper: `to_json()` (`from_json(...)` is planned and not yet implemented)
