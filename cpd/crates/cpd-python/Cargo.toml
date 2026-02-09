@@ -27,6 +27,7 @@ repro-strict = ["cpd-doctor/repro-strict"]
 [dependencies]
 cpd-core = { path = "../cpd-core" }
 cpd-offline = { path = "../cpd-offline" }
+cpd-costs = { path = "../cpd-costs" }
 cpd-online = { path = "../cpd-online" }
 cpd-doctor = { path = "../cpd-doctor" }
 pyo3 = { version = "0.22", features = ["abi3-py39", "auto-initialize"] }

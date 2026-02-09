@@ -179,6 +179,7 @@ name = "cpd-python"
 version = "0.1.0"
 dependencies = [
  "cpd-core",
+ "cpd-costs",
  "cpd-doctor",
  "cpd-offline",
  "cpd-online",

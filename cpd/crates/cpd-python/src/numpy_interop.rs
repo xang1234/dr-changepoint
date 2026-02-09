@@ -29,6 +29,12 @@ enum ValueStorage<'py> {
     OwnedF64(Vec<f64>),
 }
 
+#[derive(Clone, Debug)]
+enum OwnedValueStorage {
+    F32(Vec<f32>),
+    F64(Vec<f64>),
+}
+
 #[derive(Debug)]
 enum TimeStorage<'py> {
     None,
@@ -36,10 +42,26 @@ enum TimeStorage<'py> {
     OwnedI64(Vec<i64>),
 }
 
+#[derive(Clone, Debug)]
+enum OwnedTimeStorage {
+    None,
+    Explicit(Vec<i64>),
+}
+
 #[derive(Debug)]
 pub(crate) struct ParsedSeries<'py> {
     values: ValueStorage<'py>,
     time: TimeStorage<'py>,
+    n: usize,
+    d: usize,
+    missing_policy: MissingPolicy,
+    diagnostics: Vec<String>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct OwnedSeries {
+    values: OwnedValueStorage,
+    time: OwnedTimeStorage,
     n: usize,
     d: usize,
     missing_policy: MissingPolicy,
@@ -66,9 +88,13 @@ impl<'py> ParsedSeries<'py> {
 
         let time_index = match &self.time {
             TimeStorage::None => TimeIndex::None,
-            TimeStorage::BorrowedI64(time) => TimeIndex::Explicit(time.as_slice().map_err(|_| {
-                CpdError::invalid_input("internal error: expected contiguous borrowed time index")
-            })?),
+            TimeStorage::BorrowedI64(time) => {
+                TimeIndex::Explicit(time.as_slice().map_err(|_| {
+                    CpdError::invalid_input(
+                        "internal error: expected contiguous borrowed time index",
+                    )
+                })?)
+            }
             TimeStorage::OwnedI64(time) => TimeIndex::Explicit(time.as_slice()),
         };
 
@@ -79,6 +105,84 @@ impl<'py> ParsedSeries<'py> {
 
         TimeSeriesView::new(
             dtype_view,
+            self.n,
+            self.d,
+            MemoryLayout::CContiguous,
+            None,
+            time_index,
+            self.missing_policy,
+        )
+    }
+
+    pub(crate) fn diagnostics(&self) -> &[String] {
+        &self.diagnostics
+    }
+
+    pub(crate) fn into_owned(self) -> Result<OwnedSeries, CpdError> {
+        let values = match self.values {
+            ValueStorage::BorrowedF32(values) => OwnedValueStorage::F32(
+                values
+                    .as_slice()
+                    .map_err(|_| {
+                        CpdError::invalid_input(
+                            "internal error: expected contiguous borrowed f32 values",
+                        )
+                    })?
+                    .to_vec(),
+            ),
+            ValueStorage::BorrowedF64(values) => OwnedValueStorage::F64(
+                values
+                    .as_slice()
+                    .map_err(|_| {
+                        CpdError::invalid_input(
+                            "internal error: expected contiguous borrowed f64 values",
+                        )
+                    })?
+                    .to_vec(),
+            ),
+            ValueStorage::OwnedF32(values) => OwnedValueStorage::F32(values),
+            ValueStorage::OwnedF64(values) => OwnedValueStorage::F64(values),
+        };
+
+        let time = match self.time {
+            TimeStorage::None => OwnedTimeStorage::None,
+            TimeStorage::BorrowedI64(time) => OwnedTimeStorage::Explicit(
+                time.as_slice()
+                    .map_err(|_| {
+                        CpdError::invalid_input(
+                            "internal error: expected contiguous borrowed time index",
+                        )
+                    })?
+                    .to_vec(),
+            ),
+            TimeStorage::OwnedI64(time) => OwnedTimeStorage::Explicit(time),
+        };
+
+        Ok(OwnedSeries {
+            values,
+            time,
+            n: self.n,
+            d: self.d,
+            missing_policy: self.missing_policy,
+            diagnostics: self.diagnostics,
+        })
+    }
+}
+
+impl OwnedSeries {
+    pub(crate) fn view(&self) -> Result<TimeSeriesView<'_>, CpdError> {
+        let values = match &self.values {
+            OwnedValueStorage::F32(values) => DTypeView::F32(values.as_slice()),
+            OwnedValueStorage::F64(values) => DTypeView::F64(values.as_slice()),
+        };
+
+        let time_index = match &self.time {
+            OwnedTimeStorage::None => TimeIndex::None,
+            OwnedTimeStorage::Explicit(time) => TimeIndex::Explicit(time.as_slice()),
+        };
+
+        TimeSeriesView::new(
+            values,
             self.n,
             self.d,
             MemoryLayout::CContiguous,
@@ -196,9 +300,8 @@ fn parse_f32_storage<'py>(
         return match dtype_policy {
             DTypePolicy::KeepInput => Ok(ValueStorage::BorrowedF32(readonly)),
             DTypePolicy::ForceF64 => {
-                diagnostics.push(
-                    "upcast from float32 to float64 (cost model requires f64)".to_string(),
-                );
+                diagnostics
+                    .push("upcast from float32 to float64 (cost model requires f64)".to_string());
                 Ok(ValueStorage::OwnedF64(
                     readonly
                         .as_slice()
@@ -225,7 +328,9 @@ fn parse_f32_storage<'py>(
     }
 
     match dtype_policy {
-        DTypePolicy::KeepInput => Ok(ValueStorage::OwnedF32(copy_f32_from_readonly(&readonly, n, d))),
+        DTypePolicy::KeepInput => Ok(ValueStorage::OwnedF32(copy_f32_from_readonly(
+            &readonly, n, d,
+        ))),
         DTypePolicy::ForceF64 => {
             diagnostics
                 .push("upcast from float32 to float64 (cost model requires f64)".to_string());
@@ -457,14 +562,9 @@ mod tests {
     fn c_contiguous_f64_1d_zero_copy() {
         Python::with_gil(|py| {
             let x = eval_numpy(py, "np.array([1.0, 2.0, 3.0], dtype=np.float64)");
-            let parsed = parse_numpy_series(
-                py,
-                &x,
-                None,
-                MissingPolicy::Error,
-                DTypePolicy::KeepInput,
-            )
-            .expect("parsing should succeed");
+            let parsed =
+                parse_numpy_series(py, &x, None, MissingPolicy::Error, DTypePolicy::KeepInput)
+                    .expect("parsing should succeed");
             let view = parsed.view().expect("view should be valid");
 
             let array = x
@@ -487,14 +587,9 @@ mod tests {
                 py,
                 "np.array([[1.0, 2.0], [3.0, 4.0]], dtype=np.float64, order='C')",
             );
-            let parsed = parse_numpy_series(
-                py,
-                &x,
-                None,
-                MissingPolicy::Error,
-                DTypePolicy::KeepInput,
-            )
-            .expect("parsing should succeed");
+            let parsed =
+                parse_numpy_series(py, &x, None, MissingPolicy::Error, DTypePolicy::KeepInput)
+                    .expect("parsing should succeed");
             let view = parsed.view().expect("view should be valid");
 
             assert_eq!(view.n, 2);
@@ -517,14 +612,9 @@ mod tests {
     fn c_contiguous_f32_keep_input_is_zero_copy() {
         Python::with_gil(|py| {
             let x = eval_numpy(py, "np.array([1.0, 2.0, 3.0], dtype=np.float32)");
-            let parsed = parse_numpy_series(
-                py,
-                &x,
-                None,
-                MissingPolicy::Error,
-                DTypePolicy::KeepInput,
-            )
-            .expect("parsing should succeed");
+            let parsed =
+                parse_numpy_series(py, &x, None, MissingPolicy::Error, DTypePolicy::KeepInput)
+                    .expect("parsing should succeed");
             let view = parsed.view().expect("view should be valid");
 
             let array = x
@@ -544,14 +634,9 @@ mod tests {
     fn c_contiguous_f32_force_f64_upcasts_with_note() {
         Python::with_gil(|py| {
             let x = eval_numpy(py, "np.array([1.0, 2.0, 3.0], dtype=np.float32)");
-            let parsed = parse_numpy_series(
-                py,
-                &x,
-                None,
-                MissingPolicy::Error,
-                DTypePolicy::ForceF64,
-            )
-            .expect("parsing should succeed");
+            let parsed =
+                parse_numpy_series(py, &x, None, MissingPolicy::Error, DTypePolicy::ForceF64)
+                    .expect("parsing should succeed");
             let view = parsed.view().expect("view should be valid");
 
             match view.values {
@@ -574,14 +659,9 @@ mod tests {
                 py,
                 "np.asfortranarray(np.array([[1.0, 2.0], [3.0, 4.0]], dtype=np.float64))",
             );
-            let parsed = parse_numpy_series(
-                py,
-                &x,
-                None,
-                MissingPolicy::Error,
-                DTypePolicy::KeepInput,
-            )
-            .expect("parsing should succeed");
+            let parsed =
+                parse_numpy_series(py, &x, None, MissingPolicy::Error, DTypePolicy::KeepInput)
+                    .expect("parsing should succeed");
             let view = parsed.view().expect("view should be valid");
 
             let source = x
@@ -606,14 +686,9 @@ mod tests {
     fn strided_f64_copies_with_note() {
         Python::with_gil(|py| {
             let x = eval_numpy(py, "np.arange(10, dtype=np.float64)[::2]");
-            let parsed = parse_numpy_series(
-                py,
-                &x,
-                None,
-                MissingPolicy::Error,
-                DTypePolicy::KeepInput,
-            )
-            .expect("parsing should succeed");
+            let parsed =
+                parse_numpy_series(py, &x, None, MissingPolicy::Error, DTypePolicy::KeepInput)
+                    .expect("parsing should succeed");
             let view = parsed.view().expect("view should be valid");
 
             let source = x
@@ -634,8 +709,9 @@ mod tests {
     fn invalid_dtype_is_rejected() {
         Python::with_gil(|py| {
             let x = eval_numpy(py, "np.array([1, 2, 3], dtype=np.int64)");
-            let err = parse_numpy_series(py, &x, None, MissingPolicy::Error, DTypePolicy::KeepInput)
-                .expect_err("int dtype must be rejected");
+            let err =
+                parse_numpy_series(py, &x, None, MissingPolicy::Error, DTypePolicy::KeepInput)
+                    .expect_err("int dtype must be rejected");
             assert!(err.is_instance_of::<PyTypeError>(py));
             err_contains(&err, "expected float32 or float64");
         });
@@ -645,8 +721,9 @@ mod tests {
     fn nans_with_missing_policy_error_are_rejected() {
         Python::with_gil(|py| {
             let x = eval_numpy(py, "np.array([1.0, np.nan, 3.0], dtype=np.float64)");
-            let err = parse_numpy_series(py, &x, None, MissingPolicy::Error, DTypePolicy::KeepInput)
-                .expect_err("nan + MissingPolicy::Error should fail");
+            let err =
+                parse_numpy_series(py, &x, None, MissingPolicy::Error, DTypePolicy::KeepInput)
+                    .expect_err("nan + MissingPolicy::Error should fail");
             assert!(err.is_instance_of::<PyValueError>(py));
             err_contains(&err, "MissingPolicy::Error");
         });
@@ -668,9 +745,14 @@ mod tests {
             err_contains(&scalar_err, "shape (n,) or (n, d)");
 
             let cube = eval_numpy(py, "np.zeros((2, 2, 2), dtype=np.float64)");
-            let cube_err =
-                parse_numpy_series(py, &cube, None, MissingPolicy::Error, DTypePolicy::KeepInput)
-                    .expect_err("3D input must fail");
+            let cube_err = parse_numpy_series(
+                py,
+                &cube,
+                None,
+                MissingPolicy::Error,
+                DTypePolicy::KeepInput,
+            )
+            .expect_err("3D input must fail");
             assert!(cube_err.is_instance_of::<PyValueError>(py));
             err_contains(&cube_err, "shape (n,) or (n, d)");
         });
@@ -704,7 +786,10 @@ mod tests {
     fn time_index_datetime64_ns_explicit() {
         Python::with_gil(|py| {
             let x = eval_numpy(py, "np.array([0.1, 0.2, 0.3], dtype=np.float64)");
-            let t = eval_numpy(py, "np.array([1, 2, 3], dtype=np.int64).view('datetime64[ns]')");
+            let t = eval_numpy(
+                py,
+                "np.array([1, 2, 3], dtype=np.int64).view('datetime64[ns]')",
+            );
             let parsed = parse_numpy_series(
                 py,
                 &x,
@@ -747,14 +832,9 @@ mod tests {
     fn omitted_time_index_defaults_to_none() {
         Python::with_gil(|py| {
             let x = eval_numpy(py, "np.array([0.1, 0.2, 0.3], dtype=np.float64)");
-            let parsed = parse_numpy_series(
-                py,
-                &x,
-                None,
-                MissingPolicy::Error,
-                DTypePolicy::KeepInput,
-            )
-            .expect("parsing should succeed");
+            let parsed =
+                parse_numpy_series(py, &x, None, MissingPolicy::Error, DTypePolicy::KeepInput)
+                    .expect("parsing should succeed");
             let view = parsed.view().expect("view should be valid");
 
             match view.time {
@@ -763,6 +843,38 @@ mod tests {
                     panic!("expected TimeIndex::None")
                 }
             }
+        });
+    }
+
+    #[test]
+    fn into_owned_detaches_data_and_preserves_diagnostics() {
+        Python::with_gil(|py| {
+            let x = eval_numpy(
+                py,
+                "np.asfortranarray(np.array([[1.0, 2.0], [3.0, 4.0]], dtype=np.float64))",
+            );
+            let parsed =
+                parse_numpy_series(py, &x, None, MissingPolicy::Error, DTypePolicy::KeepInput)
+                    .expect("parsing should succeed");
+            let owned = parsed.into_owned().expect("snapshot should succeed");
+            let view = owned.view().expect("owned snapshot should validate");
+
+            let source = x
+                .downcast::<PyArrayDyn<f64>>()
+                .expect("x should be float64");
+            let source_ptr = source
+                .readonly()
+                .as_slice()
+                .expect("fortran array should still be contiguous")
+                .as_ptr();
+
+            assert_ne!(view_f64_ptr(&view), source_ptr);
+            assert!(
+                owned
+                    .diagnostics()
+                    .iter()
+                    .any(|note| note.contains("copied from F-contiguous to C-contiguous layout"))
+            );
         });
     }
 }

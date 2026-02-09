@@ -1,6 +1,7 @@
 from ._cpd_rs import (
     Diagnostics,
     OfflineChangePointResult,
+    Pelt,
     PruningStats,
     SegmentStats,
     SmokeDetector,
@@ -14,6 +15,7 @@ __all__ = [
     "SegmentStats",
     "Diagnostics",
     "OfflineChangePointResult",
+    "Pelt",
     "SmokeDetector",
     "smoke_detect",
 ]

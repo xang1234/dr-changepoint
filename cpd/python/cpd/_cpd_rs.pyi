@@ -82,6 +82,20 @@ class OfflineChangePointResult:
     def to_json(self) -> str: ...
 
 
+class Pelt:
+    def __init__(
+        self,
+        model: str = "l2",
+        min_segment_len: int = 2,
+        jump: int = 1,
+        max_change_points: int | None = None,
+    ) -> None: ...
+    def fit(self, values: Any) -> Pelt: ...
+    def predict(
+        self, *, pen: float | None = None, n_bkps: int | None = None
+    ) -> OfflineChangePointResult: ...
+
+
 class SmokeDetector:
     def __init__(self) -> None: ...
     def fit(self, values: Sequence[float]) -> SmokeDetector: ...

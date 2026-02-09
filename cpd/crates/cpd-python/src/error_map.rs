@@ -4,10 +4,8 @@
 #![allow(dead_code)]
 
 use cpd_core::CpdError;
-use pyo3::exceptions::{
-    PyFloatingPointError, PyNotImplementedError, PyRuntimeError, PyValueError,
-};
 use pyo3::PyErr;
+use pyo3::exceptions::{PyFloatingPointError, PyNotImplementedError, PyRuntimeError, PyValueError};
 
 /// Maps core cpd-rs errors into Python exception classes.
 pub(crate) fn cpd_error_to_pyerr(err: CpdError) -> PyErr {
