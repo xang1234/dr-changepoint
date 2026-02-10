@@ -31,6 +31,7 @@ pub struct DetrendConfig {
 #[derive(Clone, Debug, PartialEq)]
 pub enum DeseasonalizeMethod {
     Differencing { period: usize },
+    StlLike { period: usize },
 }
 
 #[cfg(feature = "preprocess")]
@@ -261,6 +262,13 @@ fn validate_config(config: &PreprocessConfig) -> Result<(), CpdError> {
                     return Err(CpdError::invalid_input(
                         "Deseasonalize differencing period must be >= 1",
                     ));
+                }
+            }
+            DeseasonalizeMethod::StlLike { period } => {
+                if period < 2 {
+                    return Err(CpdError::invalid_input(format!(
+                        "Deseasonalize stl_like period must be >= 2, got {period}"
+                    )));
                 }
             }
         }
@@ -592,7 +600,120 @@ fn apply_deseasonalize(
                 "differencing period={period}; warmup prefix [0, {period}) left unchanged"
             ))
         }
+        DeseasonalizeMethod::StlLike { period } => {
+            if period >= n {
+                return Err(CpdError::invalid_input(format!(
+                    "deseasonalize stl_like requires period < n, got period={period}, n={n}"
+                )));
+            }
+
+            let trend_window = stl_like_trend_window(n, period);
+            const STL_LIKE_ITERATIONS: usize = 2;
+
+            for j in 0..d {
+                let series: Vec<f64> = (0..n).map(|t| values[t * d + j]).collect();
+                let mut trend = centered_moving_average_ignore_nan(&series, trend_window);
+                let mut deseasoned = series.clone();
+
+                for _ in 0..STL_LIKE_ITERATIONS {
+                    let detrended: Vec<f64> = (0..n)
+                        .map(|t| {
+                            let observed = series[t];
+                            let trend_value = trend[t];
+                            if observed.is_nan() || trend_value.is_nan() {
+                                f64::NAN
+                            } else {
+                                observed - trend_value
+                            }
+                        })
+                        .collect();
+                    let seasonal = mean_centered_phase_profile(&detrended, period);
+
+                    for t in 0..n {
+                        let observed = series[t];
+                        if observed.is_nan() {
+                            deseasoned[t] = f64::NAN;
+                        } else {
+                            deseasoned[t] = observed - seasonal[t % period];
+                        }
+                    }
+
+                    trend = centered_moving_average_ignore_nan(&deseasoned, trend_window);
+                }
+
+                for t in 0..n {
+                    values[t * d + j] = deseasoned[t];
+                }
+            }
+
+            Ok(format!(
+                "method=stl_like, period={period}, trend_window={trend_window}, iterations={STL_LIKE_ITERATIONS}"
+            ))
+        }
     }
+}
+
+#[cfg(feature = "preprocess")]
+fn stl_like_trend_window(n: usize, period: usize) -> usize {
+    let max_odd_n = if n % 2 == 0 { n.saturating_sub(1) } else { n };
+    let bounded = max_odd_n.min(period.saturating_mul(2).saturating_add(1));
+    bounded.max(3)
+}
+
+#[cfg(feature = "preprocess")]
+fn centered_moving_average_ignore_nan(values: &[f64], window: usize) -> Vec<f64> {
+    let n = values.len();
+    if n == 0 {
+        return vec![];
+    }
+    let half = window / 2;
+    let mut out = vec![f64::NAN; n];
+    for t in 0..n {
+        let start = t.saturating_sub(half);
+        let end = t.saturating_add(half).saturating_add(1).min(n);
+        let mut sum = 0.0;
+        let mut count = 0usize;
+        for value in &values[start..end] {
+            if value.is_nan() {
+                continue;
+            }
+            sum += *value;
+            count += 1;
+        }
+        if count > 0 {
+            out[t] = sum / count as f64;
+        }
+    }
+    out
+}
+
+#[cfg(feature = "preprocess")]
+fn mean_centered_phase_profile(values: &[f64], period: usize) -> Vec<f64> {
+    let mut sums = vec![0.0; period];
+    let mut counts = vec![0usize; period];
+
+    for (t, value) in values.iter().enumerate() {
+        if value.is_nan() {
+            continue;
+        }
+        let phase = t % period;
+        sums[phase] += *value;
+        counts[phase] += 1;
+    }
+
+    let mut profile = vec![0.0; period];
+    for phase in 0..period {
+        if counts[phase] > 0 {
+            profile[phase] = sums[phase] / counts[phase] as f64;
+        }
+    }
+
+    let mean = profile.iter().sum::<f64>() / period as f64;
+    for value in &mut profile {
+        *value -= mean;
+    }
+
+    profile
 }
 
 #[cfg(feature = "preprocess")]
@@ -753,6 +874,106 @@ mod preprocess_tests {
         );
     }
 
+    fn phase_profile_amplitude(values: &[f64], period: usize) -> f64 {
+        let mut sums = vec![0.0; period];
+        let mut counts = vec![0usize; period];
+        for (t, value) in values.iter().enumerate() {
+            if value.is_nan() {
+                continue;
+            }
+            let phase = t % period;
+            sums[phase] += *value;
+            counts[phase] += 1;
+        }
+        let mut profile = vec![0.0; period];
+        for phase in 0..period {
+            if counts[phase] > 0 {
+                profile[phase] = sums[phase] / counts[phase] as f64;
+            }
+        }
+        let mean = profile.iter().sum::<f64>() / period as f64;
+        profile
+            .iter()
+            .map(|value| (value - mean).abs())
+            .sum::<f64>()
+            / period as f64
+    }
+
+    fn lag_autocorrelation(values: &[f64], lag: usize) -> f64 {
+        if lag >= values.len() {
+            return 0.0;
+        }
+        let pairs: Vec<(f64, f64)> = (lag..values.len())
+            .filter_map(|t| {
+                let current = values[t];
+                let lagged = values[t - lag];
+                if current.is_nan() || lagged.is_nan() {
+                    None
+                } else {
+                    Some((current, lagged))
+                }
+            })
+            .collect();
+        if pairs.len() < 2 {
+            return 0.0;
+        }
+        let inv_len = 1.0 / pairs.len() as f64;
+        let mean_x = pairs.iter().map(|(x, _)| *x).sum::<f64>() * inv_len;
+        let mean_y = pairs.iter().map(|(_, y)| *y).sum::<f64>() * inv_len;
+        let mut numer = 0.0;
+        let mut denom_x = 0.0;
+        let mut denom_y = 0.0;
+        for (x, y) in pairs {
+            let dx = x - mean_x;
+            let dy = y - mean_y;
+            numer += dx * dy;
+            denom_x += dx * dx;
+            denom_y += dy * dy;
+        }
+        let denom = denom_x.sqrt() * denom_y.sqrt();
+        if !denom.is_finite() || denom <= 1e-12 {
+            0.0
+        } else {
+            (numer / denom).clamp(-1.0, 1.0)
+        }
+    }
+
+    fn remove_linear_trend(values: &[f64]) -> Vec<f64> {
+        let samples: Vec<(f64, f64)> = values
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, value)| (!value.is_nan()).then_some((idx as f64, *value)))
+            .collect();
+        if samples.len() < 2 {
+            return values.to_vec();
+        }
+
+        let m = samples.len() as f64;
+        let (sum_t, sum_y, sum_tt, sum_ty) = samples
+            .iter()
+            .fold((0.0, 0.0, 0.0, 0.0), |(st, sy, stt, sty), (t, y)| {
+                (st + *t, sy + *y, stt + t * t, sty + t * y)
+            });
+        let denom = m * sum_tt - sum_t * sum_t;
+        if !denom.is_finite() || denom.abs() <= f64::EPSILON {
+            return values.to_vec();
+        }
+        let slope = (m * sum_ty - sum_t * sum_y) / denom;
+        let intercept = (sum_y - slope * sum_t) / m;
+
+        values
+            .iter()
+            .enumerate()
+            .map(|(idx, value)| {
+                if value.is_nan() {
+                    f64::NAN
+                } else {
+                    value - (intercept + slope * idx as f64)
+                }
+            })
+            .collect()
+    }
+
     #[test]
     fn detrend_linear_removes_linear_signal() {
         let n = 64usize;
@@ -817,6 +1038,209 @@ mod preprocess_tests {
         for idx in 2..values.len() {
             assert_close(out.values()[idx], 0.0, 1e-12);
         }
+    }
+
+    #[test]
+    fn deseasonalize_stl_like_reduces_periodic_phase_amplitude() {
+        let period = 4usize;
+        let n = 96usize;
+        let pattern = [1.0, 3.0, 1.0, 3.0];
+        let values: Vec<f64> = (0..n).map(|t| pattern[t % period]).collect();
+        let baseline_amp = phase_profile_amplitude(&values, period);
+        let view = make_view(&values, n, 1, None, MissingPolicy::Error);
+        let config = PreprocessConfig {
+            deseasonalize: Some(DeseasonalizeConfig {
+                method: DeseasonalizeMethod::StlLike { period },
+            }),
+            ..PreprocessConfig::default()
+        };
+        let out = PreprocessPipeline::new(config)
+            .expect("pipeline should build")
+            .apply(&view)
+            .expect("stl-like deseasonalization should succeed");
+
+        let residual_amp = phase_profile_amplitude(out.values(), period);
+        assert!(
+            residual_amp < baseline_amp * 0.2,
+            "expected strong seasonal attenuation: before={baseline_amp}, after={residual_amp}"
+        );
+    }
+
+    #[test]
+    fn deseasonalize_stl_like_reduces_lag_autocorrelation_and_keeps_values_finite() {
+        let period = 4usize;
+        let n = 96usize;
+        let seasonal = [-1.5, 2.5, -1.5, 2.5];
+        let values: Vec<f64> = (0..n)
+            .map(|t| 0.2 * t as f64 + seasonal[t % period])
+            .collect();
+        let baseline_corr =
+            lag_autocorrelation(&remove_linear_trend(&values), period).abs();
+        let view = make_view(&values, n, 1, None, MissingPolicy::Error);
+        let config = PreprocessConfig {
+            deseasonalize: Some(DeseasonalizeConfig {
+                method: DeseasonalizeMethod::StlLike { period },
+            }),
+            ..PreprocessConfig::default()
+        };
+        let out = PreprocessPipeline::new(config)
+            .expect("pipeline should build")
+            .apply(&view)
+            .expect("stl-like deseasonalization should succeed");
+
+        for value in out.values() {
+            assert!(value.is_finite(), "value should remain finite: {value}");
+        }
+
+        let residual_corr =
+            lag_autocorrelation(&remove_linear_trend(out.values()), period).abs();
+        assert!(
+            residual_corr < baseline_corr,
+            "expected seasonal lag autocorrelation reduction: before={baseline_corr}, after={residual_corr}"
+        );
+    }
+
+    #[test]
+    fn deseasonalize_stl_like_preserves_missing_mask_and_nan_positions() {
+        let values = vec![1.0, 2.0, f64::NAN, 4.0, 1.0, 2.0, 1.0, 2.0];
+        let missing_mask = vec![0_u8, 1, 0, 0, 0, 0, 0, 0];
+        let view = make_view(&values, values.len(), 1, Some(&missing_mask), MissingPolicy::Ignore);
+        let config = PreprocessConfig {
+            deseasonalize: Some(DeseasonalizeConfig {
+                method: DeseasonalizeMethod::StlLike { period: 2 },
+            }),
+            ..PreprocessConfig::default()
+        };
+        let out = PreprocessPipeline::new(config)
+            .expect("pipeline should build")
+            .apply(&view)
+            .expect("stl-like deseasonalization should succeed");
+
+        assert!(out.values()[1].is_nan());
+        assert!(out.values()[2].is_nan());
+        for (idx, value) in out.values().iter().enumerate() {
+            if idx == 1 || idx == 2 {
+                continue;
+            }
+            assert!(value.is_finite(), "expected finite value at idx={idx}, got {value}");
+        }
+        let roundtrip = out.as_view().expect("roundtrip view should succeed");
+        assert_eq!(roundtrip.n_missing(), 2);
+    }
+
+    #[test]
+    fn deseasonalize_stl_like_is_independent_per_dimension() {
+        let n = 64usize;
+        let d = 2usize;
+        let period = 4usize;
+        let season0 = [1.0, 3.0, 1.0, 3.0];
+        let season1 = [12.0, -6.0, 8.0, -10.0];
+        let mut values = Vec::with_capacity(n * d);
+        let mut col0 = Vec::with_capacity(n);
+        let mut col1 = Vec::with_capacity(n);
+        for t in 0..n {
+            let v0 = 0.1 * t as f64 + season0[t % period];
+            let v1 = -0.2 * t as f64 + season1[t % period];
+            values.push(v0);
+            values.push(v1);
+            col0.push(v0);
+            col1.push(v1);
+        }
+
+        let config = PreprocessConfig {
+            deseasonalize: Some(DeseasonalizeConfig {
+                method: DeseasonalizeMethod::StlLike { period },
+            }),
+            ..PreprocessConfig::default()
+        };
+
+        let multi = PreprocessPipeline::new(config.clone())
+            .expect("pipeline should build")
+            .apply(&make_view(&values, n, d, None, MissingPolicy::Error))
+            .expect("multivariate run should succeed");
+        let uni0 = PreprocessPipeline::new(config.clone())
+            .expect("pipeline should build")
+            .apply(&make_view(&col0, n, 1, None, MissingPolicy::Error))
+            .expect("first univariate run should succeed");
+        let uni1 = PreprocessPipeline::new(config)
+            .expect("pipeline should build")
+            .apply(&make_view(&col1, n, 1, None, MissingPolicy::Error))
+            .expect("second univariate run should succeed");
+
+        for t in 0..n {
+            assert_close(multi.values()[t * d], uni0.values()[t], 1e-9);
+            assert_close(multi.values()[t * d + 1], uni1.values()[t], 1e-9);
+        }
+    }
+
+    #[test]
+    fn deseasonalize_stl_like_reports_expected_metadata() {
+        let values: Vec<f64> = (0..24).map(|t| [1.0, 3.0, 1.0, 3.0][t % 4]).collect();
+        let view = make_view(&values, values.len(), 1, None, MissingPolicy::Error);
+        let config = PreprocessConfig {
+            deseasonalize: Some(DeseasonalizeConfig {
+                method: DeseasonalizeMethod::StlLike { period: 4 },
+            }),
+            ..PreprocessConfig::default()
+        };
+        let out = PreprocessPipeline::new(config)
+            .expect("pipeline should build")
+            .apply(&view)
+            .expect("stl-like deseasonalization should succeed");
+        let note = out
+            .reports()
+            .iter()
+            .find(|step| step.step == "deseasonalize")
+            .expect("deseasonalize report should be present")
+            .notes
+            .first()
+            .expect("deseasonalize report should include note");
+
+        assert!(note.contains("method=stl_like"));
+        assert!(note.contains("period=4"));
+        assert!(note.contains("trend_window="));
+        assert!(note.contains("iterations=2"));
+    }
+
+    #[test]
+    fn stl_like_period_below_two_is_rejected_at_pipeline_construction() {
+        for period in [0usize, 1usize] {
+            let err = PreprocessPipeline::new(PreprocessConfig {
+                deseasonalize: Some(DeseasonalizeConfig {
+                    method: DeseasonalizeMethod::StlLike { period },
+                }),
+                ..PreprocessConfig::default()
+            })
+            .expect_err("period below two should be rejected");
+            let msg = err.to_string();
+            assert!(
+                msg.contains("Deseasonalize stl_like period must be >= 2"),
+                "unexpected error: {msg}"
+            );
+        }
+    }
+
+    #[test]
+    fn stl_like_requires_period_less_than_series_length_at_apply_time() {
+        let values = vec![1.0, 3.0, 1.0, 3.0, 1.0, 3.0, 1.0, 3.0];
+        let view = make_view(&values, values.len(), 1, None, MissingPolicy::Error);
+        let config = PreprocessConfig {
+            deseasonalize: Some(DeseasonalizeConfig {
+                method: DeseasonalizeMethod::StlLike {
+                    period: values.len(),
+                },
+            }),
+            ..PreprocessConfig::default()
+        };
+        let err = PreprocessPipeline::new(config)
+            .expect("pipeline should build")
+            .apply(&view)
+            .expect_err("period >= n should fail at apply time");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("deseasonalize stl_like requires period < n"),
+            "unexpected error: {msg}"
+        );
     }
 
     #[test]

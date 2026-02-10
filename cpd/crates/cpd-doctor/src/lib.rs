@@ -572,6 +572,7 @@ mod tests {
 mod preprocess_tests {
     use super::{DoctorPreprocessConfig, recommend_preprocessing};
     use cpd_core::{MemoryLayout, MissingPolicy, TimeIndex, TimeSeriesView};
+    use cpd_preprocess::DeseasonalizeMethod;
 
     fn make_view(values: &[f64], n: usize) -> TimeSeriesView<'_> {
         TimeSeriesView::from_f64(
@@ -606,7 +607,15 @@ mod preprocess_tests {
         let rec = recommend_preprocessing(&view, &DoctorPreprocessConfig::default())
             .expect("recommendation should succeed");
         let pipeline = rec.pipeline.expect("pipeline should be present");
-        assert!(pipeline.config().deseasonalize.is_some());
+        let deseasonalize = pipeline
+            .config()
+            .deseasonalize
+            .as_ref()
+            .expect("deseasonalize should be present");
+        assert_eq!(
+            deseasonalize.method,
+            DeseasonalizeMethod::Differencing { period: 2 }
+        );
     }
 
     #[test]
