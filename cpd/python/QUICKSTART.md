@@ -9,6 +9,11 @@ maturin develop --release --manifest-path ../crates/cpd-python/Cargo.toml
 python -c "import cpd; print(cpd.__version__)"
 ```
 
+If you are on Apple Silicon, run the architecture verification and troubleshooting
+steps in
+[`../docs/python_apple_silicon_toolchain.md`](../docs/python_apple_silicon_toolchain.md)
+before or after this build step when diagnosing linker/import failures.
+
 ## 2. Detect change points with high-level APIs
 
 ```python

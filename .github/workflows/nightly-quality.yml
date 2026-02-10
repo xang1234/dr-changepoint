@@ -3,6 +3,7 @@ name: nightly-quality
 on:
   schedule:
     - cron: "0 3 * * *"
+    - cron: "0 4 * * 0"
   workflow_dispatch:
 
 permissions:
@@ -59,8 +60,9 @@ jobs:
           path: cpd/fuzz/artifacts
           if-no-files-found: ignore
 
-  soak-tests:
-    name: soak-tests
+  soak-tests-1h:
+    name: soak-tests-1h
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.schedule == '0 3 * * *' }}
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
@@ -80,6 +82,15 @@ jobs:
         with:
           workspaces: cpd
 
+      - name: Run cpd-online concurrency + soak scaffold tests
+        working-directory: cpd
+        env:
+          CPD_SOAK_PROFILE: nightly_1h
+          CPD_SOAK_METRICS_OUT: nightly-soak-metrics.json
+        run: |
+          cargo test -p cpd-online --test concurrency
+          cargo test -p cpd-online --test soak
+
       - name: Run release-mode workspace tests
         working-directory: cpd
         run: cargo test --workspace --release --all-targets --exclude cpd-bench
@@ -96,6 +107,71 @@ jobs:
           pytest -q \
             tests/test_pelt.py::test_pelt_large_array_smoke \
             tests/test_pelt.py::test_pelt_releases_gil_during_predict
+
+      - name: Upload nightly soak metrics artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: cpd-online-soak-metrics-nightly-1h
+          path: cpd/nightly-soak-metrics.json
+          if-no-files-found: error
+
+  soak-tests-24h:
+    name: soak-tests-24h
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.schedule == '0 4 * * 0' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: cpd
+
+      - name: Run cpd-online weekly soak scaffold profile
+        working-directory: cpd
+        env:
+          CPD_SOAK_PROFILE: weekly_24h
+          CPD_SOAK_METRICS_OUT: weekly-soak-metrics.json
+        run: cargo test -p cpd-online --test soak soak_rss_metrics_are_well_formed_when_available -- --exact
+
+      - name: Upload weekly soak metrics artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: cpd-online-soak-metrics-weekly-24h
+          path: cpd/weekly-soak-metrics.json
+          if-no-files-found: error
+
+  miri-concurrency:
+    name: miri-concurrency
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.schedule == '0 4 * * 0' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust nightly with miri
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: miri
+
+      - name: Cache Rust artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: cpd
+
+      - name: Setup Miri
+        working-directory: cpd
+        run: cargo +nightly miri setup
+
+      - name: Run cpd-online concurrency subset under Miri
+        working-directory: cpd
+        run: cargo +nightly miri test -p cpd-online --test concurrency concurrent_budget_enforcement_is_deterministic -- --exact
 
   extended-benchmarks:
     name: extended-benchmarks

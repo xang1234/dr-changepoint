@@ -60,6 +60,29 @@ jobs:
       - name: Run cargo test
         run: cargo test --workspace --all-targets --exclude cpd-bench --exclude cpd-python
 
+  cpd-online-concurrency-smoke:
+    name: cpd-online-concurrency-smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        shell: bash
+        working-directory: cpd
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: cpd
+
+      - name: Run cpd-online concurrency smoke tests
+        run: cargo test -p cpd-online --test concurrency
+
   proptest-mvp-a:
     name: proptest-mvp-a
     runs-on: ubuntu-latest

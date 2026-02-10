@@ -15,6 +15,10 @@ python -m pip install --upgrade pip maturin numpy
 maturin develop --release --manifest-path ../crates/cpd-python/Cargo.toml
 ```
 
+Apple Silicon contributors should run the architecture checks and sanity path in
+[`../docs/python_apple_silicon_toolchain.md`](../docs/python_apple_silicon_toolchain.md)
+before debugging `pyo3`/linker errors.
+
 ## API Map
 
 - `cpd.Pelt`: high-level PELT detector.
@@ -109,6 +113,12 @@ Fix: always call `.fit(x)` first.
 4. Extension import fails after Rust/Python upgrade
 Cause: wheel/extension built against a different interpreter environment.
 Fix: rebuild via `maturin develop --release` in the active environment.
+
+5. Apple Silicon linker mismatch (`arm64` vs `x86_64`)
+Cause: host shell/interpreter/libpython architectures do not match.
+Fix: follow
+[`../docs/python_apple_silicon_toolchain.md`](../docs/python_apple_silicon_toolchain.md)
+to verify architecture and run the CI-aligned local sanity flow.
 
 ## API Reference Outline
 
