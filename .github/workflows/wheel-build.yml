@@ -62,11 +62,25 @@ jobs:
             *) echo "Unsupported runner OS: ${{ runner.os }}" >&2; exit 1 ;;
           esac
 
-      - name: Build wheels
+      - name: Build stable wheels
         uses: pypa/cibuildwheel@v2.23.0
         env:
           CIBW_ARCHS: ${{ matrix.cibw_archs }}
-          CIBW_BUILD: ${{ github.event_name == 'pull_request' && 'cp311-* cp312-* cp313-*' || 'cp39-* cp310-* cp311-* cp312-* cp313-*' }}
+          CIBW_BUILD: ${{ github.event_name == 'pull_request' && 'cp311-* cp312-*' || 'cp39-* cp310-* cp311-* cp312-*' }}
+          CIBW_SKIP: "pp* *-musllinux_*"
+          CIBW_BUILD_VERBOSITY: "1"
+          CIBW_PRERELEASE_PYTHONS: "True"
+          CIBW_ENVIRONMENT: "PYO3_USE_ABI3_FORWARD_COMPATIBILITY=1"
+        with:
+          package-dir: cpd/python
+          output-dir: cpd/target/wheels
+
+      - name: Build Python 3.13 wheels (experimental)
+        continue-on-error: true
+        uses: pypa/cibuildwheel@v2.23.0
+        env:
+          CIBW_ARCHS: ${{ matrix.cibw_archs }}
+          CIBW_BUILD: "cp313-*"
           CIBW_SKIP: "pp* *-musllinux_*"
           CIBW_BUILD_VERBOSITY: "1"
           CIBW_PRERELEASE_PYTHONS: "True"

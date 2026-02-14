@@ -15,11 +15,14 @@ DENY_SUBSTRINGS = (
     "mkl",
     "atlas",
     "cblas",
+    "accelerate",
+    "veclib",
 )
 
 LIB_NAME_PATTERN = re.compile(
     r"(?i)(?:^|[\\/\s:])([A-Za-z0-9_.+-]+\.(?:so(?:\.[0-9]+)*|dylib|dll))(?=$|[\s,:)])"
 )
+FRAMEWORK_NAME_PATTERN = re.compile(r"(?i)([A-Za-z0-9_.+-]+\.framework)")
 
 
 def parse_libraries(report_text: str) -> set[str]:
@@ -27,6 +30,8 @@ def parse_libraries(report_text: str) -> set[str]:
     found: set[str] = set()
     for line in report_text.splitlines():
         for match in LIB_NAME_PATTERN.findall(line):
+            found.add(Path(match).name.lower())
+        for match in FRAMEWORK_NAME_PATTERN.findall(line):
             found.add(Path(match).name.lower())
     return found
 

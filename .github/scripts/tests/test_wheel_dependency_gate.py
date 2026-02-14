@@ -33,6 +33,16 @@ class WheelDependencyGateTests(unittest.TestCase):
         self.assertIn("libsystem.b.dylib", libraries)
         self.assertIn("libobjc.a.dylib", libraries)
 
+    def test_parse_libraries_from_framework_style_output(self):
+        report = """
+        /tmp/wheelhouse/cpd_rs.whl:
+            /System/Library/Frameworks/Accelerate.framework/Versions/A/Accelerate
+            /System/Library/Frameworks/CoreFoundation.framework/Versions/A/CoreFoundation
+        """
+        libraries = wheel_dependency_gate.parse_libraries(report)
+        self.assertIn("accelerate.framework", libraries)
+        self.assertIn("corefoundation.framework", libraries)
+
     def test_parse_libraries_from_delvewheel_output(self):
         report = """
         cpd_rs-0.1.0-cp312-cp312-win_amd64.whl
@@ -53,6 +63,11 @@ class WheelDependencyGateTests(unittest.TestCase):
         libraries = {"mylapack.dll", "vcruntime140.dll"}
         blocked = wheel_dependency_gate.find_blocked_libraries(libraries)
         self.assertEqual(blocked, ["mylapack.dll"])
+
+    def test_find_blocked_libraries_detects_accelerate_framework(self):
+        libraries = {"accelerate.framework", "corefoundation.framework"}
+        blocked = wheel_dependency_gate.find_blocked_libraries(libraries)
+        self.assertEqual(blocked, ["accelerate.framework"])
 
     def test_contains_manylinux_tag(self):
         self.assertTrue(
