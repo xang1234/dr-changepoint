@@ -13,6 +13,26 @@ This project publishes security metadata for each tagged release:
 
 Release assets are attached to the corresponding GitHub release tag (`v*`).
 
+## Wheel hardening controls
+
+Release wheels are built with `cibuildwheel` and aligned with non-release wheel CI:
+
+- Linux manylinux x86_64
+- macOS universal2
+- Windows amd64
+- Python `3.9` through `3.13`
+
+Dependency/linkage gates run per wheel artifact:
+
+- Linux: `auditwheel show`
+- macOS: `delocate-listdeps`
+- Windows: `delvewheel show`
+
+All reports are checked by `.github/scripts/wheel_dependency_gate.py`, which blocks
+unexpected BLAS/LAPACK-style dependencies (for example OpenBLAS/MKL) in default
+wheels. Linux gates additionally require a `manylinux` tag to be reported by
+`auditwheel`.
+
 ## 1. Verify checksums
 
 Download release assets and run:

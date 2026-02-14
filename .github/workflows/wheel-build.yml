@@ -1,11 +1,14 @@
 name: wheel-build
 
 on:
+  pull_request:
   push:
     branches:
       - main
     tags:
       - "v*"
+  schedule:
+    - cron: "0 8 * * *"
   workflow_dispatch:
 
 permissions:
@@ -13,14 +16,22 @@ permissions:
 
 jobs:
   build-wheels:
-    name: build-${{ matrix.os }}-py${{ matrix.python-version }}
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 30
+    name: build-${{ matrix.platform_artifact }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
-        python-version: ["3.9", "3.10", "3.11", "3.12"]
+        include:
+          - runner: ubuntu-latest
+            platform_artifact: linux-manylinux-x86_64
+            cibw_archs: x86_64
+          - runner: macos-13
+            platform_artifact: macos-universal2
+            cibw_archs: universal2
+          - runner: windows-2022
+            platform_artifact: windows-amd64
+            cibw_archs: AMD64
 
     steps:
       - name: Checkout
@@ -29,7 +40,7 @@ jobs:
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
-          python-version: ${{ matrix.python-version }}
+          python-version: "3.11"
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
@@ -39,16 +50,69 @@ jobs:
         with:
           workspaces: cpd
 
-      - name: Install maturin
-        run: python -m pip install --upgrade pip maturin
+      - name: Install wheel audit tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          case "${{ runner.os }}" in
+            Linux) python -m pip install auditwheel ;;
+            macOS) python -m pip install delocate ;;
+            Windows) python -m pip install delvewheel ;;
+            *) echo "Unsupported runner OS: ${{ runner.os }}" >&2; exit 1 ;;
+          esac
 
-      - name: Build wheel
-        working-directory: cpd/python
-        run: maturin build --release --interpreter python
+      - name: Build wheels
+        uses: pypa/cibuildwheel@v2.23.0
+        env:
+          CIBW_ARCHS: ${{ matrix.cibw_archs }}
+          CIBW_BUILD: ${{ github.event_name == 'pull_request' && 'cp311-* cp312-* cp313-*' || 'cp39-* cp310-* cp311-* cp312-* cp313-*' }}
+          CIBW_SKIP: "pp* *-musllinux_*"
+          CIBW_BUILD_VERBOSITY: "1"
+          CIBW_PRERELEASE_PYTHONS: "True"
+          CIBW_ENVIRONMENT: "PYO3_USE_ABI3_FORWARD_COMPATIBILITY=1"
+        with:
+          package-dir: cpd/python
+          output-dir: cpd/target/wheels
+
+      - name: Gate wheel dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+
+          wheels=(cpd/target/wheels/*.whl)
+          if [[ ${#wheels[@]} -eq 0 ]]; then
+            echo "No wheels were built." >&2
+            exit 1
+          fi
+
+          for wheel in "${wheels[@]}"; do
+            report="$(mktemp)"
+            case "${{ runner.os }}" in
+              Linux)
+                auditwheel show "$wheel" | tee "$report"
+                python .github/scripts/wheel_dependency_gate.py --tool auditwheel --wheel "$wheel" --report "$report"
+                ;;
+              macOS)
+                delocate-listdeps "$wheel" | tee "$report"
+                python .github/scripts/wheel_dependency_gate.py --tool delocate --wheel "$wheel" --report "$report"
+                ;;
+              Windows)
+                python -m delvewheel show "$wheel" | tee "$report"
+                python .github/scripts/wheel_dependency_gate.py --tool delvewheel --wheel "$wheel" --report "$report"
+                ;;
+              *)
+                echo "Unsupported runner OS: ${{ runner.os }}" >&2
+                exit 1
+                ;;
+            esac
+            rm -f "$report"
+          done
 
       - name: Upload wheel artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: wheel-${{ matrix.os }}-py${{ matrix.python-version }}
+          name: wheel-${{ matrix.platform_artifact }}
           path: cpd/target/wheels/*.whl
           if-no-files-found: error

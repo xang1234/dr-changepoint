@@ -11,16 +11,112 @@ permissions:
   actions: read
 
 jobs:
-  smoke:
-    name: smoke-${{ matrix.os }}-py${{ matrix.python-version }}
+  prepare_matrices:
+    name: prepare-matrices
     if: ${{ github.event.workflow_run.conclusion == 'success' }}
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 20
+    runs-on: ubuntu-latest
+    outputs:
+      tiered_matrix: ${{ steps.emit.outputs.tiered_matrix }}
+      full_matrix: ${{ steps.emit.outputs.full_matrix }}
+    steps:
+      - id: emit
+        shell: bash
+        run: |
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import json
+
+          tiered = {
+              "include": [
+                  {
+                      "runner": "ubuntu-latest",
+                      "runner_arch": "x86_64",
+                      "platform_artifact": "linux-manylinux-x86_64",
+                      "python_version": "3.11",
+                      "numpy_series": "1.26.*",
+                      "experimental": False,
+                  },
+                  {
+                      "runner": "ubuntu-latest",
+                      "runner_arch": "x86_64",
+                      "platform_artifact": "linux-manylinux-x86_64",
+                      "python_version": "3.12",
+                      "numpy_series": "2.*",
+                      "experimental": False,
+                  },
+                  {
+                      "runner": "windows-2022",
+                      "runner_arch": "x86_64",
+                      "platform_artifact": "windows-amd64",
+                      "python_version": "3.12",
+                      "numpy_series": "2.*",
+                      "experimental": False,
+                  },
+                  {
+                      "runner": "macos-13",
+                      "runner_arch": "x86_64",
+                      "platform_artifact": "macos-universal2",
+                      "python_version": "3.11",
+                      "numpy_series": "1.26.*",
+                      "experimental": False,
+                  },
+                  {
+                      "runner": "macos-14",
+                      "runner_arch": "arm64",
+                      "platform_artifact": "macos-universal2",
+                      "python_version": "3.12",
+                      "numpy_series": "2.*",
+                      "experimental": False,
+                  },
+                  {
+                      "runner": "ubuntu-latest",
+                      "runner_arch": "x86_64",
+                      "platform_artifact": "linux-manylinux-x86_64",
+                      "python_version": "3.13",
+                      "numpy_series": "2.*",
+                      "experimental": True,
+                  },
+              ]
+          }
+
+          platform_map = {
+              "ubuntu-latest": ("linux-manylinux-x86_64", "x86_64"),
+              "windows-2022": ("windows-amd64", "x86_64"),
+              "macos-13": ("macos-universal2", "x86_64"),
+              "macos-14": ("macos-universal2", "arm64"),
+          }
+          full_rows = []
+          for runner in ("ubuntu-latest", "windows-2022", "macos-13", "macos-14"):
+              artifact, arch = platform_map[runner]
+              for py in ("3.9", "3.10", "3.11", "3.12", "3.13"):
+                  for np in ("1.26.*", "2.*"):
+                      if py == "3.13" and np == "1.26.*":
+                          continue
+                      full_rows.append(
+                          {
+                              "runner": runner,
+                              "runner_arch": arch,
+                              "platform_artifact": artifact,
+                              "python_version": py,
+                              "numpy_series": np,
+                              "experimental": py == "3.13",
+                          }
+                      )
+          full = {"include": full_rows}
+
+          print(f"tiered_matrix={json.dumps(tiered, separators=(',', ':'))}")
+          print(f"full_matrix={json.dumps(full, separators=(',', ':'))}")
+          PY
+
+  smoke-tiered:
+    name: smoke-tiered-${{ matrix.runner_arch }}-py${{ matrix.python_version }}-np${{ matrix.numpy_series }}
+    if: ${{ github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'pull_request' }}
+    needs: prepare_matrices
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 25
+    continue-on-error: ${{ matrix.experimental }}
     strategy:
       fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
-        python-version: ["3.9", "3.10", "3.11", "3.12"]
+      matrix: ${{ fromJson(needs.prepare_matrices.outputs.tiered_matrix) }}
 
     steps:
       - name: Checkout triggering commit
@@ -31,35 +127,122 @@ jobs:
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
-          python-version: ${{ matrix.python-version }}
+          python-version: ${{ matrix.python_version }}
 
       - name: Download matching wheel artifact
         uses: actions/download-artifact@v4
         with:
           run-id: ${{ github.event.workflow_run.id }}
           github-token: ${{ secrets.GITHUB_TOKEN }}
-          name: wheel-${{ matrix.os }}-py${{ matrix.python-version }}
+          name: wheel-${{ matrix.platform_artifact }}
           path: wheelhouse
 
-      - name: Install wheel
+      - name: Install wheel for matrix row
         run: |
           python -m pip install --upgrade pip
-          python -c "from pathlib import Path; import subprocess, sys; wheels = sorted(Path('wheelhouse').glob('*.whl')); wheel = wheels[0] if len(wheels) == 1 else None; wheel is not None or sys.exit(f'expected exactly one wheel artifact, found {len(wheels)}: {[str(w) for w in wheels]}'); subprocess.check_call([sys.executable, '-m', 'pip', 'install', str(wheel)])"
+          python -m pip install --upgrade "numpy==${{ matrix.numpy_series }}"
+          python -m pip install --no-index --find-links wheelhouse cpd-rs
 
-      - name: Import smoke test
-        run: >
-          python -c "import time, numpy as np; t=time.perf_counter(); import cpd; dt=time.perf_counter()-t;
-          print(cpd.__version__); print(f'import_seconds={dt:.6f}');
-          assert dt < 2.0, f'import took {dt:.3f}s, expected < 2.0s';
-          x=np.concatenate((np.zeros(50, dtype=np.float64), np.full(50, 5.0, dtype=np.float64)));
-          p=cpd.Pelt(model='l2').fit(x).predict(n_bkps=1);
-          b=cpd.Binseg(model='l2').fit(x).predict(n_bkps=1);
-          low=cpd.detect_offline(x, detector='pelt', cost='l2', stopping={'n_bkps': 1});
-          assert p.breakpoints == [50, 100];
-          assert b.breakpoints == [50, 100];
-          assert low.breakpoints == [50, 100]"
+      - name: Inline import and API smoke
+        run: |
+          python - <<'PY'
+          import time
+          import numpy as np
+          import cpd
 
-      - name: Run Python smoke test module
+          t = time.perf_counter()
+          _ = cpd.__version__
+          dt = time.perf_counter() - t
+          print(f"import_seconds={dt:.6f}")
+          assert dt < 2.0, f"import took {dt:.3f}s, expected < 2.0s"
+
+          x = np.concatenate((np.zeros(50, dtype=np.float64), np.full(50, 5.0, dtype=np.float64)))
+          p = cpd.Pelt(model="l2").fit(x).predict(n_bkps=1)
+          b = cpd.Binseg(model="l2").fit(x).predict(n_bkps=1)
+          low = cpd.detect_offline(x, detector="pelt", cost="l2", stopping={"n_bkps": 1})
+          assert p.breakpoints == [50, 100]
+          assert b.breakpoints == [50, 100]
+          assert low.breakpoints == [50, 100]
+          assert low.diagnostics.blas_backend is None
+          PY
+
+      - name: Run smoke test module
         run: |
           python -m pip install pytest
-          pytest -q cpd/python/tests/test_smoke.py cpd/python/tests/test_integration_mvp_a.py
+          pytest -q cpd/python/tests/test_smoke.py
+
+      - name: Run MVP-A integration spot check
+        if: ${{ matrix.runner == 'ubuntu-latest' && matrix.python_version == '3.11' && matrix.numpy_series == '1.26.*' }}
+        run: |
+          python -m pip install pytest
+          pytest -q cpd/python/tests/test_integration_mvp_a.py
+
+  smoke-full:
+    name: smoke-full-${{ matrix.runner_arch }}-py${{ matrix.python_version }}-np${{ matrix.numpy_series }}
+    if: ${{ github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event != 'pull_request' }}
+    needs: prepare_matrices
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 25
+    continue-on-error: ${{ matrix.experimental }}
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.prepare_matrices.outputs.full_matrix) }}
+
+    steps:
+      - name: Checkout triggering commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python_version }}
+
+      - name: Download matching wheel artifact
+        uses: actions/download-artifact@v4
+        with:
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          name: wheel-${{ matrix.platform_artifact }}
+          path: wheelhouse
+
+      - name: Install wheel for matrix row
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install --upgrade "numpy==${{ matrix.numpy_series }}"
+          python -m pip install --no-index --find-links wheelhouse cpd-rs
+
+      - name: Inline import and API smoke
+        run: |
+          python - <<'PY'
+          import time
+          import numpy as np
+          import cpd
+
+          t = time.perf_counter()
+          _ = cpd.__version__
+          dt = time.perf_counter() - t
+          print(f"import_seconds={dt:.6f}")
+          assert dt < 2.0, f"import took {dt:.3f}s, expected < 2.0s"
+
+          x = np.concatenate((np.zeros(50, dtype=np.float64), np.full(50, 5.0, dtype=np.float64)))
+          p = cpd.Pelt(model="l2").fit(x).predict(n_bkps=1)
+          b = cpd.Binseg(model="l2").fit(x).predict(n_bkps=1)
+          low = cpd.detect_offline(x, detector="pelt", cost="l2", stopping={"n_bkps": 1})
+          assert p.breakpoints == [50, 100]
+          assert b.breakpoints == [50, 100]
+          assert low.breakpoints == [50, 100]
+          assert low.diagnostics.blas_backend is None
+          PY
+
+      - name: Run smoke test module
+        run: |
+          python -m pip install pytest
+          pytest -q cpd/python/tests/test_smoke.py
+
+      - name: Run MVP-A integration spot check
+        if: ${{ matrix.runner == 'ubuntu-latest' && matrix.python_version == '3.11' && matrix.numpy_series == '1.26.*' }}
+        run: |
+          python -m pip install pytest
+          pytest -q cpd/python/tests/test_integration_mvp_a.py

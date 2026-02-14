@@ -117,6 +117,32 @@ CPD_PARITY_PROFILE=full CPD_PARITY_REPORT_OUT=/tmp/cpd-parity-report.json pytest
 See [`../docs/parity_ruptures.md`](../docs/parity_ruptures.md) for corpus structure,
 tolerance rules, and CI thresholds.
 
+## Wheel CI Policy
+
+Cross-platform wheel hardening is enforced by
+[`../../.github/workflows/wheel-build.yml`](../../.github/workflows/wheel-build.yml)
+and [`../../.github/workflows/wheel-smoke.yml`](../../.github/workflows/wheel-smoke.yml).
+
+- Build backend: `cibuildwheel`
+- Platforms:
+  - Linux manylinux x86_64
+  - macOS universal2 (validated on `macos-13` and `macos-14`)
+  - Windows amd64 (`windows-2022`)
+- Python matrix:
+  - Full (`main`/nightly/tag): `3.9`, `3.10`, `3.11`, `3.12`, `3.13`
+  - Tiered (`pull_request`): representative subset with at least one `3.13` row
+- NumPy matrix:
+  - `1.26.*` and `2.*`
+  - `3.13 + numpy 1.26.*` is excluded
+- Python `3.13` rows are marked `experimental` and soft-gated (`continue-on-error`)
+
+Default wheels are BLAS-free by policy:
+
+- Native dependency reports are gated by
+  [`../../.github/scripts/wheel_dependency_gate.py`](../../.github/scripts/wheel_dependency_gate.py)
+  using `auditwheel` (Linux), `delocate` (macOS), and `delvewheel` (Windows).
+- Runtime smoke asserts `low.diagnostics.blas_backend is None` for default wheel installs.
+
 ## Troubleshooting
 
 1. `TypeError: expected float32 or float64`

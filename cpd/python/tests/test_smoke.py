@@ -37,6 +37,7 @@ def test_mvp_a_high_level_and_low_level_smoke() -> None:
     assert low.change_points == [50]
     assert low.diagnostics.algorithm == "pelt"
     assert low.diagnostics.cost_model == "l2_mean"
+    assert low.diagnostics.blas_backend is None
 
 
 def test_typed_marker_present() -> None:
