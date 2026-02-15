@@ -2,10 +2,14 @@
 
 #![forbid(unsafe_code)]
 
+use crate::event_time::{
+    LateDataCounters, LateDataPolicy, OverflowPolicy, compare_event_time_then_arrival,
+};
 use cpd_core::{
     CpdError, ExecutionContext, OnlineDetector, OnlineStepResult, log_add_exp, log_sum_exp,
 };
 use std::f64::consts::PI;
+use std::mem;
 use std::time::Instant;
 
 /// Hazard-function contract used by BOCPD run-length transitions.
@@ -320,14 +324,39 @@ pub enum ObservationStats {
     Bernoulli { n: usize, ones: u64 },
 }
 
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[derive(Clone, Debug, PartialEq)]
+struct PendingEvent {
+    x: f64,
+    t_ns: i64,
+    arrival_seq: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct StepSummary {
+    t: usize,
+    p_change: f64,
+    alert: bool,
+    run_length_mode: usize,
+    run_length_mean: f64,
+}
+
 /// Serializable BOCPD state for checkpoint/restore.
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Clone, Debug, PartialEq)]
 pub struct BocpdState {
     pub t: usize,
     pub watermark_ns: Option<i64>,
+    /// Event-time late-data counters that survive checkpoint/restore.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub late_data: LateDataCounters,
     pub log_run_probs: Vec<f64>,
     pub run_stats: Vec<ObservationStats>,
+    /// Pending events awaiting flush according to `late_data_policy`.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pending_events: Vec<PendingEvent>,
+    #[cfg_attr(feature = "serde", serde(default))]
+    next_arrival_seq: u64,
 }
 
 impl BocpdState {
@@ -335,8 +364,11 @@ impl BocpdState {
         Self {
             t: 0,
             watermark_ns: None,
+            late_data: LateDataCounters::default(),
             log_run_probs: vec![0.0],
             run_stats: vec![observation.prior_stats()],
+            pending_events: vec![],
+            next_arrival_seq: 0,
         }
     }
 
@@ -353,6 +385,13 @@ impl BocpdState {
                 self.run_stats.len()
             )));
         }
+        for event in &self.pending_events {
+            if !event.x.is_finite() {
+                return Err(CpdError::invalid_input(
+                    "bocpd pending event contains non-finite observation",
+                ));
+            }
+        }
         Ok(())
     }
 }
@@ -366,6 +405,8 @@ pub struct BocpdConfig {
     /// Relative log-probability threshold (must be <= 0). Entries below `max + threshold` are pruned.
     pub log_prob_threshold: Option<f64>,
     pub alert_threshold: f64,
+    /// Event-time late-data policy used when `update(..., t_ns=Some(...), ...)`.
+    pub late_data_policy: LateDataPolicy,
 }
 
 impl Default for BocpdConfig {
@@ -376,6 +417,7 @@ impl Default for BocpdConfig {
             max_run_length: 2_000,
             log_prob_threshold: Some(-35.0),
             alert_threshold: 0.5,
+            late_data_policy: LateDataPolicy::Reject,
         }
     }
 }
@@ -404,6 +446,8 @@ impl BocpdConfig {
             ));
         }
 
+        self.late_data_policy.validate()?;
+
         Ok(())
     }
 }
@@ -429,32 +473,70 @@ impl BocpdDetector {
     pub fn state(&self) -> &BocpdState {
         &self.state
     }
-}
 
-impl OnlineDetector for BocpdDetector {
-    type State = BocpdState;
+    fn step_summary_from_log_probs(
+        &self,
+        log_probs: &[f64],
+        t: usize,
+    ) -> Result<StepSummary, CpdError> {
+        let first = *log_probs.first().ok_or_else(|| {
+            CpdError::numerical_issue("BOCPD step summary requires at least one run-length state")
+        })?;
 
-    fn reset(&mut self) {
-        self.state = BocpdState::new(&self.config.observation);
+        let mut p_change = first.exp();
+        if !p_change.is_finite() {
+            return Err(CpdError::numerical_issue(
+                "BOCPD p_change became non-finite after normalization",
+            ));
+        }
+        p_change = p_change.clamp(0.0, 1.0);
+
+        Ok(StepSummary {
+            t,
+            p_change,
+            alert: p_change >= self.config.alert_threshold,
+            run_length_mode: argmax_index(log_probs),
+            run_length_mean: run_length_expectation(log_probs),
+        })
     }
 
-    fn update(
+    fn current_step_summary(&self) -> Result<StepSummary, CpdError> {
+        self.step_summary_from_log_probs(&self.state.log_run_probs, self.state.t.saturating_sub(1))
+    }
+
+    fn materialize_step_result(
+        &self,
+        summary: StepSummary,
+        started_at: Instant,
+        alert_reason: Option<String>,
+    ) -> OnlineStepResult {
+        OnlineStepResult {
+            t: summary.t,
+            p_change: summary.p_change,
+            alert: summary.alert,
+            alert_reason: alert_reason.or_else(|| {
+                summary.alert.then(|| {
+                    format!(
+                        "bocpd p_change {:.6} >= threshold {:.6}",
+                        summary.p_change, self.config.alert_threshold
+                    )
+                })
+            }),
+            run_length_mode: summary.run_length_mode,
+            run_length_mean: summary.run_length_mean,
+            processing_latency_us: Some(started_at.elapsed().as_micros() as u64),
+        }
+    }
+
+    fn apply_observation(
         &mut self,
-        x_t: &[f64],
+        x: f64,
         t_ns: Option<i64>,
         ctx: &ExecutionContext<'_>,
-    ) -> Result<OnlineStepResult, CpdError> {
+    ) -> Result<StepSummary, CpdError> {
         ctx.check_cancelled()?;
         let _ = ctx.check_cost_eval_budget(self.state.t.saturating_add(1))?;
 
-        if x_t.len() != 1 {
-            return Err(CpdError::invalid_input(format!(
-                "BOCPD currently supports univariate updates only; got d={} (expected 1)",
-                x_t.len()
-            )));
-        }
-
-        let x = x_t[0];
         if !x.is_finite() {
             return Err(CpdError::invalid_input(
                 "BOCPD observation must be finite for update",
@@ -463,7 +545,6 @@ impl OnlineDetector for BocpdDetector {
 
         self.state.validate()?;
 
-        let started_at = Instant::now();
         let prior_stats = self.config.observation.prior_stats();
         let prev_len = self.state.log_run_probs.len();
         let hard_cap = self.config.max_run_length.saturating_add(1);
@@ -522,19 +603,6 @@ impl OnlineDetector for BocpdDetector {
 
         normalize_log_probs(&mut next_log_probs)?;
 
-        let run_length_mode = argmax_index(&next_log_probs);
-        let run_length_mean = run_length_expectation(&next_log_probs);
-
-        let mut p_change = next_log_probs[0].exp();
-        if !p_change.is_finite() {
-            return Err(CpdError::numerical_issue(
-                "BOCPD p_change became non-finite after normalization",
-            ));
-        }
-        p_change = p_change.clamp(0.0, 1.0);
-
-        let alert = p_change >= self.config.alert_threshold;
-
         self.state.t = self.state.t.saturating_add(1);
         if let Some(ts) = t_ns {
             self.state.watermark_ns = Some(self.state.watermark_ns.map_or(ts, |w| w.max(ts)));
@@ -542,20 +610,269 @@ impl OnlineDetector for BocpdDetector {
         self.state.log_run_probs = next_log_probs;
         self.state.run_stats = next_stats;
 
-        Ok(OnlineStepResult {
-            t: self.state.t.saturating_sub(1),
-            p_change,
-            alert,
-            alert_reason: alert.then(|| {
-                format!(
-                    "bocpd p_change {:.6} >= threshold {:.6}",
-                    p_change, self.config.alert_threshold
+        self.step_summary_from_log_probs(&self.state.log_run_probs, self.state.t.saturating_sub(1))
+    }
+
+    fn next_arrival_seq(&mut self) -> u64 {
+        let seq = self.state.next_arrival_seq;
+        self.state.next_arrival_seq = self.state.next_arrival_seq.saturating_add(1);
+        seq
+    }
+
+    fn enqueue_pending_event(&mut self, x: f64, t_ns: i64) -> u64 {
+        let arrival_seq = self.next_arrival_seq();
+        self.state.pending_events.push(PendingEvent {
+            x,
+            t_ns,
+            arrival_seq,
+        });
+        self.state.late_data.buffered_events =
+            self.state.late_data.buffered_events.saturating_add(1);
+        arrival_seq
+    }
+
+    fn oldest_pending_index(&self, reorder_by_timestamp: bool) -> Option<usize> {
+        if self.state.pending_events.is_empty() {
+            return None;
+        }
+
+        if !reorder_by_timestamp {
+            return Some(0);
+        }
+
+        self.state
+            .pending_events
+            .iter()
+            .enumerate()
+            .min_by(|(_, lhs), (_, rhs)| {
+                compare_event_time_then_arrival(
+                    lhs.t_ns,
+                    lhs.arrival_seq,
+                    rhs.t_ns,
+                    rhs.arrival_seq,
                 )
-            }),
-            run_length_mode,
-            run_length_mean,
-            processing_latency_us: Some(started_at.elapsed().as_micros() as u64),
+            })
+            .map(|(idx, _)| idx)
+    }
+
+    fn drain_pending_until(
+        &mut self,
+        current_arrival_seq: u64,
+        reorder_by_timestamp: bool,
+        ctx: &ExecutionContext<'_>,
+    ) -> Result<StepSummary, CpdError> {
+        let mut drained = mem::take(&mut self.state.pending_events);
+        if reorder_by_timestamp {
+            let arrival_order: Vec<u64> = drained.iter().map(|event| event.arrival_seq).collect();
+            drained.sort_by(|lhs, rhs| {
+                compare_event_time_then_arrival(
+                    lhs.t_ns,
+                    lhs.arrival_seq,
+                    rhs.t_ns,
+                    rhs.arrival_seq,
+                )
+            });
+            let moved = drained
+                .iter()
+                .zip(arrival_order.iter())
+                .filter(|(event, seq)| event.arrival_seq != **seq)
+                .count();
+            if moved > 0 {
+                self.state.late_data.reordered_events = self
+                    .state
+                    .late_data
+                    .reordered_events
+                    .saturating_add(moved as u64);
+            }
+        }
+
+        let mut current_summary: Option<StepSummary> = None;
+        for event in drained {
+            let summary = self.apply_observation(event.x, Some(event.t_ns), ctx)?;
+            if event.arrival_seq == current_arrival_seq {
+                current_summary = Some(summary);
+            }
+        }
+
+        current_summary.ok_or_else(|| {
+            CpdError::numerical_issue(
+                "BOCPD pending-buffer drain failed to locate the current arrival sequence",
+            )
         })
+    }
+}
+
+impl OnlineDetector for BocpdDetector {
+    type State = BocpdState;
+
+    fn reset(&mut self) {
+        self.state = BocpdState::new(&self.config.observation);
+    }
+
+    fn update(
+        &mut self,
+        x_t: &[f64],
+        t_ns: Option<i64>,
+        ctx: &ExecutionContext<'_>,
+    ) -> Result<OnlineStepResult, CpdError> {
+        ctx.check_cancelled()?;
+
+        if x_t.len() != 1 {
+            return Err(CpdError::invalid_input(format!(
+                "BOCPD currently supports univariate updates only; got d={} (expected 1)",
+                x_t.len()
+            )));
+        }
+
+        let x = x_t[0];
+        if !x.is_finite() {
+            return Err(CpdError::invalid_input(
+                "BOCPD observation must be finite for update",
+            ));
+        }
+
+        self.state.validate()?;
+        let started_at = Instant::now();
+        if t_ns.is_none() {
+            if !self.state.pending_events.is_empty() {
+                return Err(CpdError::invalid_input(
+                    "BOCPD update received t_ns=None while pending late events exist; provide timestamps until the pending buffer drains",
+                ));
+            }
+            let summary = self.apply_observation(x, None, ctx)?;
+            return Ok(self.materialize_step_result(summary, started_at, None));
+        }
+
+        let ts = t_ns.expect("checked Some above");
+        match self.config.late_data_policy.clone() {
+            LateDataPolicy::Reject => {
+                if self
+                    .state
+                    .watermark_ns
+                    .is_some_and(|watermark| ts < watermark)
+                {
+                    self.state.late_data.late_events =
+                        self.state.late_data.late_events.saturating_add(1);
+                    return Err(CpdError::invalid_input(format!(
+                        "late event rejected by policy=Reject: t_ns={ts}, watermark_ns={}",
+                        self.state
+                            .watermark_ns
+                            .expect("watermark must exist when event is late"),
+                    )));
+                }
+
+                let summary = self.apply_observation(x, Some(ts), ctx)?;
+                Ok(self.materialize_step_result(summary, started_at, None))
+            }
+            LateDataPolicy::BufferWithinWindow {
+                max_delay_ns,
+                max_buffer_items,
+                on_overflow,
+            }
+            | LateDataPolicy::ReorderByTimestamp {
+                max_delay_ns,
+                max_buffer_items,
+                on_overflow,
+            } => {
+                let reorder_by_timestamp = matches!(
+                    self.config.late_data_policy,
+                    LateDataPolicy::ReorderByTimestamp { .. }
+                );
+                let watermark = self.state.watermark_ns;
+                let is_late = watermark.is_some_and(|w| ts < w);
+
+                if is_late {
+                    self.state.late_data.late_events =
+                        self.state.late_data.late_events.saturating_add(1);
+                    let watermark_ns = watermark.expect("watermark must exist for late event");
+                    let delay_ns = watermark_ns.saturating_sub(ts);
+                    let within_window = delay_ns <= max_delay_ns;
+                    let buffer_has_capacity = self.state.pending_events.len() < max_buffer_items;
+
+                    if within_window && buffer_has_capacity {
+                        self.enqueue_pending_event(x, ts);
+                        let summary = self.current_step_summary()?;
+                        return Ok(self.materialize_step_result(
+                            summary,
+                            started_at,
+                            Some("late data buffered; detector state unchanged".to_string()),
+                        ));
+                    }
+
+                    let cause = if within_window {
+                        format!("buffer capacity exceeded (max_buffer_items={max_buffer_items})")
+                    } else {
+                        format!(
+                            "delay exceeded window (delay_ns={delay_ns}, max_delay_ns={max_delay_ns})"
+                        )
+                    };
+
+                    match on_overflow {
+                        OverflowPolicy::DropNewest => {
+                            self.state.late_data.dropped_newest =
+                                self.state.late_data.dropped_newest.saturating_add(1);
+                            let summary = self.current_step_summary()?;
+                            Ok(self.materialize_step_result(
+                                summary,
+                                started_at,
+                                Some(format!(
+                                    "late data dropped ({cause}, overflow={})",
+                                    on_overflow.as_str()
+                                )),
+                            ))
+                        }
+                        OverflowPolicy::Error => {
+                            self.state.late_data.overflow_errors =
+                                self.state.late_data.overflow_errors.saturating_add(1);
+                            Err(CpdError::invalid_input(format!(
+                                "late-data overflow (policy={}, overflow={}): {}",
+                                self.config.late_data_policy.as_str(),
+                                on_overflow.as_str(),
+                                cause
+                            )))
+                        }
+                        OverflowPolicy::DropOldest => {
+                            if let Some(drop_idx) = self.oldest_pending_index(reorder_by_timestamp)
+                            {
+                                self.state.pending_events.remove(drop_idx);
+                                self.state.late_data.dropped_oldest =
+                                    self.state.late_data.dropped_oldest.saturating_add(1);
+                            }
+
+                            if self.state.pending_events.len() >= max_buffer_items {
+                                self.state.late_data.dropped_newest =
+                                    self.state.late_data.dropped_newest.saturating_add(1);
+                                let summary = self.current_step_summary()?;
+                                return Ok(self.materialize_step_result(
+                                    summary,
+                                    started_at,
+                                    Some(format!(
+                                        "late data dropped ({cause}, overflow={})",
+                                        on_overflow.as_str()
+                                    )),
+                                ));
+                            }
+
+                            self.enqueue_pending_event(x, ts);
+                            let summary = self.current_step_summary()?;
+                            Ok(self.materialize_step_result(
+                                summary,
+                                started_at,
+                                Some(format!(
+                                    "late data buffered after dropping oldest ({cause}, overflow={})",
+                                    on_overflow.as_str()
+                                )),
+                            ))
+                        }
+                    }
+                } else {
+                    let current_arrival_seq = self.enqueue_pending_event(x, ts);
+                    let summary =
+                        self.drain_pending_until(current_arrival_seq, reorder_by_timestamp, ctx)?;
+                    Ok(self.materialize_step_result(summary, started_at, None))
+                }
+            }
+        }
     }
 
     fn save_state(&self) -> Self::State {
@@ -815,7 +1132,7 @@ fn ln_gamma(z: f64) -> f64 {
 mod tests {
     use super::{
         BocpdConfig, BocpdDetector, BocpdState, ConstantHazard, GeometricHazard, HazardSpec,
-        ObservationModel,
+        LateDataPolicy, ObservationModel, OverflowPolicy,
     };
     use cpd_core::{Constraints, ExecutionContext, OnlineDetector};
     use std::sync::OnceLock;
@@ -828,6 +1145,17 @@ mod tests {
 
     fn probs_from_log_probs(log_probs: &[f64]) -> Vec<f64> {
         log_probs.iter().map(|value| value.exp()).collect()
+    }
+
+    fn make_event_time_detector(policy: LateDataPolicy) -> BocpdDetector {
+        BocpdDetector::new(BocpdConfig {
+            hazard: HazardSpec::Constant(ConstantHazard::new(0.2).expect("valid hazard")),
+            max_run_length: 32,
+            log_prob_threshold: None,
+            late_data_policy: policy,
+            ..BocpdConfig::default()
+        })
+        .expect("config should be valid")
     }
 
     #[test]
@@ -1068,6 +1396,267 @@ mod tests {
             err.to_string().contains("bernoulli observation"),
             "unexpected error: {err}"
         );
+    }
+
+    #[test]
+    fn late_data_policy_validation_is_enforced_by_config() {
+        let invalid = BocpdConfig {
+            late_data_policy: LateDataPolicy::BufferWithinWindow {
+                max_delay_ns: 0,
+                max_buffer_items: 4,
+                on_overflow: OverflowPolicy::Error,
+            },
+            ..BocpdConfig::default()
+        };
+        let err = BocpdDetector::new(invalid).expect_err("invalid max_delay_ns must fail");
+        assert!(err.to_string().contains("max_delay_ns"));
+    }
+
+    #[test]
+    fn in_order_event_time_updates_watermark() {
+        let mut detector = make_event_time_detector(LateDataPolicy::Reject);
+        detector
+            .update(&[0.0], Some(100), &ctx())
+            .expect("first update should succeed");
+        detector
+            .update(&[0.0], Some(110), &ctx())
+            .expect("second update should succeed");
+        assert_eq!(detector.state().watermark_ns, Some(110));
+    }
+
+    #[test]
+    fn reject_policy_errors_on_late_event() {
+        let mut detector = make_event_time_detector(LateDataPolicy::Reject);
+        detector
+            .update(&[0.0], Some(100), &ctx())
+            .expect("first update should succeed");
+
+        let err = detector
+            .update(&[0.0], Some(90), &ctx())
+            .expect_err("late update should fail for Reject policy");
+        assert!(err.to_string().contains("late event rejected"));
+        assert_eq!(detector.state().late_data.late_events, 1);
+    }
+
+    #[test]
+    fn buffer_within_window_buffers_and_flushes_on_on_time_event() {
+        let mut detector = make_event_time_detector(LateDataPolicy::BufferWithinWindow {
+            max_delay_ns: 10,
+            max_buffer_items: 8,
+            on_overflow: OverflowPolicy::Error,
+        });
+
+        detector
+            .update(&[0.0], Some(100), &ctx())
+            .expect("first update should succeed");
+
+        let buffered = detector
+            .update(&[1.0], Some(95), &ctx())
+            .expect("late update should be buffered");
+        assert_eq!(detector.state().t, 1);
+        assert_eq!(buffered.t, 0);
+        assert!(
+            buffered
+                .alert_reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("buffered"))
+        );
+
+        let flushed = detector
+            .update(&[2.0], Some(101), &ctx())
+            .expect("on-time update should flush pending events");
+        assert_eq!(flushed.t, 2);
+        assert_eq!(detector.state().t, 3);
+        assert_eq!(detector.state().watermark_ns, Some(101));
+        assert_eq!(detector.state().late_data.late_events, 1);
+    }
+
+    #[test]
+    fn reorder_policy_reorders_by_timestamp_and_tracks_counter() {
+        let mut detector = make_event_time_detector(LateDataPolicy::ReorderByTimestamp {
+            max_delay_ns: 10,
+            max_buffer_items: 8,
+            on_overflow: OverflowPolicy::Error,
+        });
+
+        detector
+            .update(&[0.0], Some(100), &ctx())
+            .expect("first update should succeed");
+        detector
+            .update(&[1.0], Some(99), &ctx())
+            .expect("late update should be buffered");
+        detector
+            .update(&[2.0], Some(98), &ctx())
+            .expect("late update should be buffered");
+        detector
+            .update(&[3.0], Some(101), &ctx())
+            .expect("on-time update should flush pending events");
+
+        assert_eq!(detector.state().t, 4);
+        assert!(detector.state().late_data.reordered_events > 0);
+    }
+
+    #[test]
+    fn overflow_drop_newest_returns_noop_and_counts_drop() {
+        let mut detector = make_event_time_detector(LateDataPolicy::BufferWithinWindow {
+            max_delay_ns: 10,
+            max_buffer_items: 1,
+            on_overflow: OverflowPolicy::DropNewest,
+        });
+
+        detector
+            .update(&[0.0], Some(100), &ctx())
+            .expect("first update should succeed");
+        detector
+            .update(&[1.0], Some(99), &ctx())
+            .expect("late update should be buffered");
+        let dropped = detector
+            .update(&[2.0], Some(98), &ctx())
+            .expect("overflow drop-newest should return no-op");
+        assert_eq!(detector.state().t, 1);
+        assert!(
+            dropped
+                .alert_reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("dropped"))
+        );
+        assert_eq!(detector.state().late_data.dropped_newest, 1);
+    }
+
+    #[test]
+    fn overflow_drop_oldest_evicts_oldest_buffered_event() {
+        let mut detector = make_event_time_detector(LateDataPolicy::BufferWithinWindow {
+            max_delay_ns: 10,
+            max_buffer_items: 1,
+            on_overflow: OverflowPolicy::DropOldest,
+        });
+
+        detector
+            .update(&[0.0], Some(100), &ctx())
+            .expect("first update should succeed");
+        detector
+            .update(&[1.0], Some(99), &ctx())
+            .expect("first late update should be buffered");
+        detector
+            .update(&[2.0], Some(98), &ctx())
+            .expect("second late update should drop oldest and buffer incoming");
+
+        let flushed = detector
+            .update(&[3.0], Some(101), &ctx())
+            .expect("on-time update should flush pending events");
+        assert_eq!(flushed.t, 2);
+        assert_eq!(detector.state().t, 3);
+        assert_eq!(detector.state().late_data.dropped_oldest, 1);
+    }
+
+    #[test]
+    fn overflow_error_returns_invalid_input_and_counts() {
+        let mut detector = make_event_time_detector(LateDataPolicy::BufferWithinWindow {
+            max_delay_ns: 10,
+            max_buffer_items: 1,
+            on_overflow: OverflowPolicy::Error,
+        });
+
+        detector
+            .update(&[0.0], Some(100), &ctx())
+            .expect("first update should succeed");
+        detector
+            .update(&[1.0], Some(99), &ctx())
+            .expect("late update should be buffered");
+        let err = detector
+            .update(&[2.0], Some(98), &ctx())
+            .expect_err("overflow policy=Error should fail");
+        assert!(err.to_string().contains("late-data overflow"));
+        assert_eq!(detector.state().late_data.overflow_errors, 1);
+        assert_eq!(detector.state().t, 1);
+    }
+
+    #[test]
+    fn deterministic_replay_with_reorder_policy_is_stable() {
+        let policy = LateDataPolicy::ReorderByTimestamp {
+            max_delay_ns: 20,
+            max_buffer_items: 16,
+            on_overflow: OverflowPolicy::Error,
+        };
+        let mut lhs = make_event_time_detector(policy.clone());
+        let mut rhs = make_event_time_detector(policy);
+        let events = [
+            (0.0, 100_i64),
+            (0.1, 105),
+            (2.0, 103),
+            (1.5, 104),
+            (3.0, 106),
+            (0.3, 107),
+            (4.0, 105),
+            (0.2, 108),
+        ];
+
+        for (x, ts) in events {
+            let left = lhs
+                .update(&[x], Some(ts), &ctx())
+                .expect("lhs update should succeed");
+            let right = rhs
+                .update(&[x], Some(ts), &ctx())
+                .expect("rhs update should succeed");
+            assert!((left.p_change - right.p_change).abs() < 1e-12);
+            assert_eq!(left.alert, right.alert);
+            assert_eq!(left.t, right.t);
+            assert_eq!(left.run_length_mode, right.run_length_mode);
+            assert_eq!(left.alert_reason, right.alert_reason);
+        }
+
+        assert_eq!(lhs.save_state(), rhs.save_state());
+    }
+
+    #[test]
+    fn checkpoint_roundtrip_with_pending_buffer_is_equivalent() {
+        let policy = LateDataPolicy::BufferWithinWindow {
+            max_delay_ns: 20,
+            max_buffer_items: 8,
+            on_overflow: OverflowPolicy::Error,
+        };
+        let mut baseline = make_event_time_detector(policy.clone());
+        let mut first = make_event_time_detector(policy.clone());
+
+        baseline
+            .update(&[0.0], Some(100), &ctx())
+            .expect("baseline first update should succeed");
+        first
+            .update(&[0.0], Some(100), &ctx())
+            .expect("first detector update should succeed");
+
+        let baseline_noop = baseline
+            .update(&[1.0], Some(90), &ctx())
+            .expect("baseline late event should be buffered");
+        let first_noop = first
+            .update(&[1.0], Some(90), &ctx())
+            .expect("first late event should be buffered");
+        assert_eq!(baseline_noop.t, first_noop.t);
+        assert_eq!(baseline_noop.alert_reason, first_noop.alert_reason);
+
+        let saved: BocpdState = first.save_state();
+        let mut restored = make_event_time_detector(policy);
+        restored.load_state(&saved);
+
+        for (x, ts) in [
+            (2.0, 101_i64),
+            (3.0, 102_i64),
+            (4.0, 99_i64),
+            (5.0, 103_i64),
+        ] {
+            let left = baseline
+                .update(&[x], Some(ts), &ctx())
+                .expect("baseline update should succeed");
+            let right = restored
+                .update(&[x], Some(ts), &ctx())
+                .expect("restored update should succeed");
+            assert!((left.p_change - right.p_change).abs() < 1e-12);
+            assert_eq!(left.alert, right.alert);
+            assert_eq!(left.run_length_mode, right.run_length_mode);
+            assert_eq!(left.alert_reason, right.alert_reason);
+        }
+
+        assert_eq!(baseline.save_state(), restored.save_state());
     }
 
     #[test]
