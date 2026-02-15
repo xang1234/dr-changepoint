@@ -9,7 +9,6 @@ use cpd_core::{
     CpdError, ExecutionContext, OnlineDetector, OnlineStepResult, log_add_exp, log_sum_exp,
 };
 use std::f64::consts::PI;
-use std::mem;
 use std::time::Instant;
 
 /// Hazard-function contract used by BOCPD run-length transitions.
@@ -619,15 +618,17 @@ impl BocpdDetector {
         seq
     }
 
-    fn enqueue_pending_event(&mut self, x: f64, t_ns: i64) -> u64 {
+    fn enqueue_pending_event(&mut self, x: f64, t_ns: i64, count_as_late_buffered: bool) -> u64 {
         let arrival_seq = self.next_arrival_seq();
         self.state.pending_events.push(PendingEvent {
             x,
             t_ns,
             arrival_seq,
         });
-        self.state.late_data.buffered_events =
-            self.state.late_data.buffered_events.saturating_add(1);
+        if count_as_late_buffered {
+            self.state.late_data.buffered_events =
+                self.state.late_data.buffered_events.saturating_add(1);
+        }
         arrival_seq
     }
 
@@ -655,50 +656,40 @@ impl BocpdDetector {
             .map(|(idx, _)| idx)
     }
 
-    fn drain_pending_until(
+    fn pop_next_pending_event(
         &mut self,
-        current_arrival_seq: u64,
+        reorder_by_timestamp: bool,
+    ) -> Option<(usize, PendingEvent)> {
+        if self.state.pending_events.is_empty() {
+            return None;
+        }
+        let idx = self.oldest_pending_index(reorder_by_timestamp)?;
+        Some((idx, self.state.pending_events.remove(idx)))
+    }
+
+    fn drain_pending(
+        &mut self,
         reorder_by_timestamp: bool,
         ctx: &ExecutionContext<'_>,
-    ) -> Result<StepSummary, CpdError> {
-        let mut drained = mem::take(&mut self.state.pending_events);
-        if reorder_by_timestamp {
-            let arrival_order: Vec<u64> = drained.iter().map(|event| event.arrival_seq).collect();
-            drained.sort_by(|lhs, rhs| {
-                compare_event_time_then_arrival(
-                    lhs.t_ns,
-                    lhs.arrival_seq,
-                    rhs.t_ns,
-                    rhs.arrival_seq,
-                )
-            });
-            let moved = drained
-                .iter()
-                .zip(arrival_order.iter())
-                .filter(|(event, seq)| event.arrival_seq != **seq)
-                .count();
-            if moved > 0 {
-                self.state.late_data.reordered_events = self
-                    .state
-                    .late_data
-                    .reordered_events
-                    .saturating_add(moved as u64);
+    ) -> Result<(), CpdError> {
+        while let Some((idx, event)) = self.pop_next_pending_event(reorder_by_timestamp) {
+            if reorder_by_timestamp && idx != 0 {
+                self.state.late_data.reordered_events =
+                    self.state.late_data.reordered_events.saturating_add(1);
+            }
+
+            match self.apply_observation(event.x, Some(event.t_ns), ctx) {
+                Ok(_) => {}
+                Err(err) => {
+                    self.state
+                        .pending_events
+                        .insert(idx.min(self.state.pending_events.len()), event);
+                    return Err(err);
+                }
             }
         }
 
-        let mut current_summary: Option<StepSummary> = None;
-        for event in drained {
-            let summary = self.apply_observation(event.x, Some(event.t_ns), ctx)?;
-            if event.arrival_seq == current_arrival_seq {
-                current_summary = Some(summary);
-            }
-        }
-
-        current_summary.ok_or_else(|| {
-            CpdError::numerical_issue(
-                "BOCPD pending-buffer drain failed to locate the current arrival sequence",
-            )
-        })
+        Ok(())
     }
 }
 
@@ -790,7 +781,7 @@ impl OnlineDetector for BocpdDetector {
                     let buffer_has_capacity = self.state.pending_events.len() < max_buffer_items;
 
                     if within_window && buffer_has_capacity {
-                        self.enqueue_pending_event(x, ts);
+                        self.enqueue_pending_event(x, ts, true);
                         let summary = self.current_step_summary()?;
                         return Ok(self.materialize_step_result(
                             summary,
@@ -853,7 +844,7 @@ impl OnlineDetector for BocpdDetector {
                                 ));
                             }
 
-                            self.enqueue_pending_event(x, ts);
+                            self.enqueue_pending_event(x, ts, true);
                             let summary = self.current_step_summary()?;
                             Ok(self.materialize_step_result(
                                 summary,
@@ -866,9 +857,8 @@ impl OnlineDetector for BocpdDetector {
                         }
                     }
                 } else {
-                    let current_arrival_seq = self.enqueue_pending_event(x, ts);
-                    let summary =
-                        self.drain_pending_until(current_arrival_seq, reorder_by_timestamp, ctx)?;
+                    self.drain_pending(reorder_by_timestamp, ctx)?;
+                    let summary = self.apply_observation(x, Some(ts), ctx)?;
                     Ok(self.materialize_step_result(summary, started_at, None))
                 }
             }
@@ -1472,6 +1462,33 @@ mod tests {
     }
 
     #[test]
+    fn buffered_events_counter_tracks_only_late_buffered_events() {
+        let mut detector = make_event_time_detector(LateDataPolicy::BufferWithinWindow {
+            max_delay_ns: 10,
+            max_buffer_items: 8,
+            on_overflow: OverflowPolicy::Error,
+        });
+
+        detector
+            .update(&[0.0], Some(100), &ctx())
+            .expect("first on-time update should succeed");
+        assert_eq!(detector.state().late_data.buffered_events, 0);
+
+        detector
+            .update(&[1.0], Some(95), &ctx())
+            .expect("late update should be buffered");
+        assert_eq!(detector.state().late_data.buffered_events, 1);
+
+        detector
+            .update(&[2.0], Some(101), &ctx())
+            .expect("on-time update should flush pending events");
+        detector
+            .update(&[3.0], Some(102), &ctx())
+            .expect("another on-time update should succeed");
+        assert_eq!(detector.state().late_data.buffered_events, 1);
+    }
+
+    #[test]
     fn reorder_policy_reorders_by_timestamp_and_tracks_counter() {
         let mut detector = make_event_time_detector(LateDataPolicy::ReorderByTimestamp {
             max_delay_ns: 10,
@@ -1550,6 +1567,30 @@ mod tests {
     }
 
     #[test]
+    fn on_time_update_flushes_full_buffer_without_dropping_current_event() {
+        let mut detector = make_event_time_detector(LateDataPolicy::BufferWithinWindow {
+            max_delay_ns: 10,
+            max_buffer_items: 1,
+            on_overflow: OverflowPolicy::DropNewest,
+        });
+
+        detector
+            .update(&[0.0], Some(100), &ctx())
+            .expect("first on-time update should succeed");
+        detector
+            .update(&[1.0], Some(99), &ctx())
+            .expect("late update should be buffered");
+
+        let flushed = detector
+            .update(&[2.0], Some(101), &ctx())
+            .expect("on-time update should flush buffer and process current event");
+        assert_eq!(flushed.t, 2);
+        assert_eq!(detector.state().t, 3);
+        assert_eq!(detector.state().pending_events.len(), 0);
+        assert_eq!(detector.state().late_data.dropped_newest, 0);
+    }
+
+    #[test]
     fn overflow_error_returns_invalid_input_and_counts() {
         let mut detector = make_event_time_detector(LateDataPolicy::BufferWithinWindow {
             max_delay_ns: 10,
@@ -1569,6 +1610,41 @@ mod tests {
         assert!(err.to_string().contains("late-data overflow"));
         assert_eq!(detector.state().late_data.overflow_errors, 1);
         assert_eq!(detector.state().t, 1);
+    }
+
+    #[test]
+    fn drain_error_does_not_drop_unprocessed_pending_events() {
+        let constraints = Constraints {
+            max_cost_evals: Some(1),
+            ..Constraints::default()
+        };
+        let ctx = ExecutionContext::new(&constraints);
+        let mut detector = make_event_time_detector(LateDataPolicy::BufferWithinWindow {
+            max_delay_ns: 10,
+            max_buffer_items: 8,
+            on_overflow: OverflowPolicy::Error,
+        });
+
+        detector
+            .update(&[0.0], Some(100), &ctx)
+            .expect("first on-time update should consume the only budget slot");
+        detector
+            .update(&[1.0], Some(95), &ctx)
+            .expect("late update should be buffered without consuming budget");
+        assert_eq!(detector.state().pending_events.len(), 1);
+
+        let err = detector
+            .update(&[2.0], Some(101), &ctx)
+            .expect_err("flush should fail due to budget");
+        assert!(
+            err.to_string()
+                .contains("constraints.max_cost_evals exceeded")
+        );
+
+        assert_eq!(detector.state().t, 1);
+        assert_eq!(detector.state().pending_events.len(), 1);
+        assert_eq!(detector.state().pending_events[0].t_ns, 95);
+        assert_eq!(detector.state().pending_events[0].x, 1.0);
     }
 
     #[test]
