@@ -191,10 +191,7 @@ jobs:
 
       - name: Generate cargo-audit report
         run: |
-          # Temporary security exception for PyO3 advisory while upgrade work lands.
-          # Owner: CPD-kvd.13
-          # Expires: 2026-03-15
-          cargo audit --json --ignore RUSTSEC-2025-0020 > audit-report.json || true
+          cargo audit --json > audit-report.json || true
 
       - name: Fail on high/critical advisories
         run: python3 ../.github/scripts/audit_gate.py audit-report.json

@@ -37,7 +37,7 @@ fn parse_sequence(values: &Bound<'_, PyAny>) -> PyResult<Vec<f64>> {
 }
 
 fn parse_owned_series(py: Python<'_>, x: &Bound<'_, PyAny>) -> PyResult<OwnedSeries> {
-    let numpy = PyModule::import_bound(py, "numpy")?;
+    let numpy = PyModule::import(py, "numpy")?;
     let as_array = numpy.call_method1("asarray", (x,))?;
     let parsed = parse_numpy_series(
         py,

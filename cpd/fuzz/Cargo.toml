@@ -12,8 +12,8 @@ libfuzzer-sys = "0.4"
 cpd-core = { path = "../crates/cpd-core" }
 cpd-costs = { path = "../crates/cpd-costs" }
 cpd-offline = { path = "../crates/cpd-offline" }
-cpd-python = { path = "../crates/cpd-python", features = ["fuzzing"] }
-pyo3 = { version = "0.22", features = ["auto-initialize"] }
+cpd_python = { package = "cpd-python", path = "../crates/cpd-python", features = ["fuzzing"] }
+pyo3 = { version = "0.24.1", features = ["auto-initialize"] }
 
 [[bin]]
 name = "timeseries_view_no_panic"

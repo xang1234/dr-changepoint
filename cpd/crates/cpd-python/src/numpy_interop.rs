@@ -9,7 +9,7 @@ use numpy::datetime::{Datetime, units};
 use numpy::ndarray::IxDyn;
 use numpy::{
     PyArrayDescr, PyArrayDescrMethods, PyArrayDyn, PyArrayMethods, PyReadonlyArrayDyn,
-    PyUntypedArray, PyUntypedArrayMethods, dtype_bound,
+    PyUntypedArray, PyUntypedArrayMethods, dtype,
 };
 use pyo3::exceptions::{PyRuntimeError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
@@ -245,18 +245,18 @@ fn parse_numeric_storage<'py>(
     dtype_policy: DTypePolicy,
     diagnostics: &mut Vec<String>,
 ) -> PyResult<ValueStorage<'py>> {
-    let dtype = x_array.dtype();
+    let dtype_descr = x_array.dtype();
 
-    if dtype.is_equiv_to(&dtype_bound::<f64>(py)) {
+    if dtype_descr.is_equiv_to(&dtype::<f64>(py)) {
         return parse_f64_storage(x_array, n, d, diagnostics);
     }
-    if dtype.is_equiv_to(&dtype_bound::<f32>(py)) {
+    if dtype_descr.is_equiv_to(&dtype::<f32>(py)) {
         return parse_f32_storage(x_array, n, d, dtype_policy, diagnostics);
     }
 
     Err(PyTypeError::new_err(format!(
         "expected float32 or float64, got {}",
-        dtype_name(&dtype)
+        dtype_name(&dtype_descr)
     )))
 }
 
@@ -368,17 +368,17 @@ fn parse_time_storage<'py>(
         )));
     }
 
-    let dtype = time_array.dtype();
-    if dtype.is_equiv_to(&dtype_bound::<i64>(py)) {
+    let dtype_descr = time_array.dtype();
+    if dtype_descr.is_equiv_to(&dtype::<i64>(py)) {
         return parse_i64_time_storage(time_array, diagnostics);
     }
-    if dtype.is_equiv_to(&dtype_bound::<Datetime<units::Nanoseconds>>(py)) {
+    if dtype_descr.is_equiv_to(&dtype::<Datetime<units::Nanoseconds>>(py)) {
         return parse_datetime_ns_time_storage(time_array, n, diagnostics);
     }
 
     let message = format!(
         "expected int64 or datetime64[ns] for time index, got {}",
-        dtype_name(&dtype)
+        dtype_name(&dtype_descr)
     );
     Err(PyTypeError::new_err(message))
 }
