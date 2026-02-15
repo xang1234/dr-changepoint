@@ -201,7 +201,7 @@ impl OfflineChangePointResultWire {
 #[cfg(test)]
 mod tests {
     use super::{
-        ConstraintsConfigWire, CURRENT_SCHEMA_VERSION, DiagnosticsWire,
+        CURRENT_SCHEMA_VERSION, ConstraintsConfigWire, DiagnosticsWire,
         MAX_FORWARD_COMPAT_SCHEMA_VERSION, MIGRATION_GUIDANCE_PATH, OfflineChangePointResultWire,
     };
     use crate::Constraints;
@@ -226,8 +226,8 @@ mod tests {
 
     #[test]
     fn constraints_v1_roundtrip_matches_fixture() {
-        let wire: ConstraintsConfigWire =
-            serde_json::from_str(CONSTRAINTS_V1_FIXTURE).expect("v1 constraints should deserialize");
+        let wire: ConstraintsConfigWire = serde_json::from_str(CONSTRAINTS_V1_FIXTURE)
+            .expect("v1 constraints should deserialize");
         let encoded = serde_json::to_value(&wire).expect("wire should serialize");
         assert_eq!(encoded, parse_json(CONSTRAINTS_V1_FIXTURE));
         assert_eq!(wire.schema_version, CURRENT_SCHEMA_VERSION);
@@ -235,8 +235,8 @@ mod tests {
 
     #[test]
     fn diagnostics_v1_roundtrip_matches_fixture() {
-        let wire: DiagnosticsWire =
-            serde_json::from_str(DIAGNOSTICS_V1_FIXTURE).expect("v1 diagnostics should deserialize");
+        let wire: DiagnosticsWire = serde_json::from_str(DIAGNOSTICS_V1_FIXTURE)
+            .expect("v1 diagnostics should deserialize");
         let encoded = serde_json::to_value(&wire).expect("wire should serialize");
         assert_eq!(encoded, parse_json(DIAGNOSTICS_V1_FIXTURE));
         assert_eq!(wire.schema_version(), CURRENT_SCHEMA_VERSION);
@@ -253,10 +253,10 @@ mod tests {
 
     #[test]
     fn v1_reader_accepts_v2_additive_fixtures() {
-        let constraints_wire: ConstraintsConfigWire =
-            serde_json::from_str(CONSTRAINTS_V2_FIXTURE).expect("v2 constraints should deserialize");
-        let diagnostics_wire: DiagnosticsWire =
-            serde_json::from_str(DIAGNOSTICS_V2_FIXTURE).expect("v2 diagnostics should deserialize");
+        let constraints_wire: ConstraintsConfigWire = serde_json::from_str(CONSTRAINTS_V2_FIXTURE)
+            .expect("v2 constraints should deserialize");
+        let diagnostics_wire: DiagnosticsWire = serde_json::from_str(DIAGNOSTICS_V2_FIXTURE)
+            .expect("v2 diagnostics should deserialize");
         let result_wire: OfflineChangePointResultWire =
             serde_json::from_str(RESULT_V2_FIXTURE).expect("v2 result should deserialize");
 
@@ -296,8 +296,8 @@ mod tests {
         }))
         .expect("minimal v1 constraints should deserialize");
         constraints_wire.schema_version = MAX_FORWARD_COMPAT_SCHEMA_VERSION;
-        let constraints_value = serde_json::to_value(&constraints_wire)
-            .expect("constraints wire should serialize");
+        let constraints_value =
+            serde_json::to_value(&constraints_wire).expect("constraints wire should serialize");
         assert_eq!(
             constraints_value.get("schema_version"),
             Some(&Value::from(MAX_FORWARD_COMPAT_SCHEMA_VERSION))
@@ -361,7 +361,8 @@ mod tests {
         }))
         .expect("minimal v1 result should deserialize");
         result_wire.set_schema_version(MAX_FORWARD_COMPAT_SCHEMA_VERSION);
-        let result_value = serde_json::to_value(&result_wire).expect("result wire should serialize");
+        let result_value =
+            serde_json::to_value(&result_wire).expect("result wire should serialize");
         let diagnostics_obj = result_value
             .get("diagnostics")
             .and_then(Value::as_object)
@@ -468,6 +469,9 @@ mod tests {
         let err = wire
             .to_runtime()
             .expect_err("invalid change_points must fail strict to_runtime validation");
-        assert!(err.to_string().contains("change_points must equal breakpoints excluding n"));
+        assert!(
+            err.to_string()
+                .contains("change_points must equal breakpoints excluding n")
+        );
     }
 }

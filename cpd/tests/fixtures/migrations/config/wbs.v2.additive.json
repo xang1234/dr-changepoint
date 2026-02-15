@@ -1,0 +1,12 @@
+{
+  "schema_version": 2,
+  "stopping": {
+    "Penalized": "BIC"
+  },
+  "params_per_segment": 2,
+  "num_intervals": 100,
+  "interval_strategy": "Random",
+  "seed": 0,
+  "cancel_check_every": 1000,
+  "future_wbs_flag": true
+}

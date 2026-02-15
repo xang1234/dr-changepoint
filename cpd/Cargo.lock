@@ -181,6 +181,7 @@ dependencies = [
  "cpd-core",
  "cpd-costs",
  "proptest",
+ "rayon",
  "serde",
  "serde_json",
 ]

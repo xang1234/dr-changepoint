@@ -16,7 +16,7 @@ path = "src/lib.rs"
 
 [features]
 default = []
-rayon = ["cpd-core/rayon", "cpd-costs/rayon"]
+rayon = ["cpd-core/rayon", "cpd-costs/rayon", "dep:rayon"]
 serde = ["cpd-core/serde", "cpd-costs/serde", "dep:serde", "dep:serde_json"]
 tracing = ["cpd-core/tracing", "cpd-costs/tracing"]
 simd = ["cpd-core/simd", "cpd-costs/simd"]
@@ -30,6 +30,7 @@ repro-strict = ["cpd-core/repro-strict", "cpd-costs/repro-strict"]
 [dependencies]
 cpd-core = { version = "0.1.0", path = "../cpd-core" }
 cpd-costs = { version = "0.1.0", path = "../cpd-costs" }
+rayon = { version = "1", optional = true }
 serde = { version = "1", features = ["derive"], optional = true }
 serde_json = { version = "1", optional = true }
 
