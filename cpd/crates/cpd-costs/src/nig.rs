@@ -111,7 +111,7 @@ impl Default for CostNIGMarginal {
 /// Prefix-stat cache for O(1) NIG marginal segment-cost queries.
 #[derive(Clone, Debug, PartialEq)]
 pub struct NIGCache {
-    prefix_count: Vec<usize>,
+    prefix_count: Vec<u64>,
     prefix_sum: Vec<f64>,
     prefix_sum_sq: Vec<f64>,
     prior: NIGPrior,
@@ -391,7 +391,8 @@ impl CostModel for CostNIGMarginal {
 
         for dim in 0..x.d {
             for idx in 0..=x.n {
-                prefix_count.push(idx);
+                let idx_u64 = u64::try_from(idx).map_err(|_| cache_overflow_err(x.n, x.d))?;
+                prefix_count.push(idx_u64);
             }
 
             let mut series = Vec::with_capacity(x.n);
@@ -438,7 +439,7 @@ impl CostModel for CostNIGMarginal {
             None => return usize::MAX,
         };
 
-        let count_bytes = match total_prefix_len.checked_mul(std::mem::size_of::<usize>()) {
+        let count_bytes = match total_prefix_len.checked_mul(std::mem::size_of::<u64>()) {
             Some(v) => v,
             None => return usize::MAX,
         };
@@ -908,7 +909,7 @@ mod tests {
         let prefix_len_per_dim = view.n + 1;
         let total_prefix_len = prefix_len_per_dim * view.d;
         let expected_small =
-            total_prefix_len * (std::mem::size_of::<usize>() + 2 * std::mem::size_of::<f64>());
+            total_prefix_len * (std::mem::size_of::<u64>() + 2 * std::mem::size_of::<f64>());
         assert_eq!(model.worst_case_cache_bytes(&view), expected_small);
 
         let n_large = 1_000_000usize;
@@ -917,12 +918,10 @@ mod tests {
             .checked_add(1)
             .and_then(|v| v.checked_mul(d_large))
             .and_then(|v| {
-                v.checked_mul(std::mem::size_of::<usize>() + 2 * std::mem::size_of::<f64>())
+                v.checked_mul(std::mem::size_of::<u64>() + 2 * std::mem::size_of::<f64>())
             })
             .expect("formula should not overflow");
-        if std::mem::size_of::<usize>() == 8 {
-            assert_eq!(expected_large, 384_000_384);
-        }
+        assert_eq!(expected_large, 384_000_384);
     }
 
     #[test]

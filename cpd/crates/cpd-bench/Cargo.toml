@@ -41,6 +41,11 @@ harness = false
 path = "benches/cost_l2.rs"
 
 [[bench]]
+name = "cost_multivariate"
+harness = false
+path = "benches/cost_multivariate.rs"
+
+[[bench]]
 name = "offline_pelt"
 harness = false
 path = "benches/offline_pelt.rs"
