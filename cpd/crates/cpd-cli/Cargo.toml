@@ -9,10 +9,14 @@ publish = false
 [lib]
 path = "src/lib.rs"
 
+[[bin]]
+name = "cpd"
+path = "src/main.rs"
+
 [features]
-default = []
+default = ["serde"]
 rayon = ["cpd-doctor/rayon", "cpd-offline/rayon"]
-serde = ["cpd-doctor/serde", "cpd-offline/serde", "dep:serde_json"]
+serde = ["cpd-core/serde", "cpd-doctor/serde", "cpd-offline/serde"]
 tracing = ["cpd-doctor/tracing", "cpd-offline/tracing"]
 simd = ["cpd-doctor/simd", "cpd-offline/simd"]
 kernel = ["cpd-doctor/kernel", "cpd-offline/kernel"]
@@ -25,5 +29,7 @@ repro-strict = ["cpd-doctor/repro-strict", "cpd-offline/repro-strict"]
 [dependencies]
 cpd-core = { path = "../cpd-core" }
 cpd-doctor = { path = "../cpd-doctor" }
+cpd-eval = { path = "../cpd-eval" }
 cpd-offline = { path = "../cpd-offline" }
-serde_json = { version = "1", optional = true }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
