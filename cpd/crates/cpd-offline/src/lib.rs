@@ -3,12 +3,14 @@
 #![forbid(unsafe_code)]
 
 pub mod binseg;
+pub mod dynp;
 pub mod pelt;
 #[cfg(feature = "serde")]
 pub mod schema_migration;
 pub mod wbs;
 
 pub use binseg::{BinSeg, BinSegConfig};
+pub use dynp::{Dynp, DynpConfig};
 pub use pelt::{Pelt, PeltConfig};
 #[cfg(feature = "serde")]
 pub use schema_migration::{BinSegConfigWire, PeltConfigWire, WbsConfigWire};
