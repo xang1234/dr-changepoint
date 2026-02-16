@@ -5,45 +5,40 @@
 use crate::model::CostModel;
 use cpd_core::{
     CachePolicy, CpdError, DTypeView, MemoryLayout, MissingSupport, ReproMode, TimeSeriesView,
-    prefix_sums, prefix_sums_kahan,
 };
 
-const INTEGER_TOL: f64 = 1e-9;
-const PREFIX_MONOTONIC_ULPS: f64 = 64.0;
+const BINARY_TOL: f64 = 1e-12;
+const PROB_FLOOR: f64 = f64::EPSILON * 1e6;
 
-/// Poisson segment cost model for count/rate changes.
+/// Bernoulli segment cost model for binary-event probability changes.
 ///
 /// Segment conventions use half-open intervals: `[start, end)`.
-///
-/// The returned value uses the negative log-likelihood with MLE rate and omits
-/// the per-observation `log(c_i!)` additive constants, which are independent of
-/// the segmentation objective.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct CostPoissonRate {
+pub struct CostBernoulli {
     pub repro_mode: ReproMode,
 }
 
-impl CostPoissonRate {
+impl CostBernoulli {
     pub const fn new(repro_mode: ReproMode) -> Self {
         Self { repro_mode }
     }
 }
 
-impl Default for CostPoissonRate {
+impl Default for CostBernoulli {
     fn default() -> Self {
         Self::new(ReproMode::Balanced)
     }
 }
 
-/// Prefix-stat cache for O(1) Poisson segment-cost queries.
-#[derive(Clone, Debug, PartialEq)]
-pub struct PoissonCache {
-    prefix_sum: Vec<f64>,
+/// Prefix-stat cache for O(1) Bernoulli segment-cost queries.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BernoulliCache {
+    prefix_count: Vec<usize>,
     n: usize,
     d: usize,
 }
 
-impl PoissonCache {
+impl BernoulliCache {
     fn prefix_len_per_dim(&self) -> usize {
         self.n + 1
     }
@@ -164,95 +159,65 @@ fn read_value(x: &TimeSeriesView<'_>, t: usize, dim: usize) -> Result<f64, CpdEr
     }
 }
 
-fn normalize_count(value: f64, t: usize, dim: usize) -> Result<f64, CpdError> {
-    if !value.is_finite() || value < 0.0 {
+fn parse_binary(value: f64, t: usize, dim: usize) -> Result<usize, CpdError> {
+    if !value.is_finite() {
         return Err(CpdError::invalid_input(format!(
-            "CostPoissonRate requires non-negative finite counts; got value={value} at t={t}, dim={dim}"
+            "CostBernoulli requires finite binary observations in {{0,1}}; got value={value} at t={t}, dim={dim}"
         )));
     }
 
-    let rounded = value.round();
-    if (rounded - value).abs() > INTEGER_TOL {
-        return Err(CpdError::invalid_input(format!(
-            "CostPoissonRate requires integer-valued counts; got value={value} at t={t}, dim={dim}"
-        )));
+    if (value - 0.0).abs() <= BINARY_TOL {
+        return Ok(0);
     }
 
-    Ok(rounded)
-}
-
-fn sum_tolerance(left: f64, right: f64) -> f64 {
-    let scale = left.abs().max(right.abs()).max(1.0);
-    PREFIX_MONOTONIC_ULPS * f64::EPSILON * scale
-}
-
-fn validate_prefix_sum(prefix: &[f64], dim: usize) -> Result<(), CpdError> {
-    if prefix.is_empty() || !prefix[0].is_finite() {
-        return Err(CpdError::numerical_issue(format!(
-            "CostPoissonRate prefix sums invalid at dim={dim}: missing or non-finite initial value"
-        )));
+    if (value - 1.0).abs() <= BINARY_TOL {
+        return Ok(1);
     }
 
-    let mut prev = prefix[0];
-    for (idx, curr) in prefix.iter().copied().enumerate().skip(1) {
-        if !curr.is_finite() {
-            return Err(CpdError::numerical_issue(format!(
-                "CostPoissonRate prefix sums became non-finite at dim={dim}, prefix_idx={idx}"
-            )));
-        }
-
-        let tol = sum_tolerance(prev, curr);
-        if curr + tol < prev {
-            return Err(CpdError::numerical_issue(format!(
-                "CostPoissonRate prefix sums became non-monotonic at dim={dim}, prefix_idx={idx}: prev={prev}, curr={curr}, tol={tol}"
-            )));
-        }
-
-        prev = curr;
-    }
-
-    Ok(())
+    Err(CpdError::invalid_input(format!(
+        "CostBernoulli requires binary observations in {{0,1}}; got value={value} at t={t}, dim={dim}"
+    )))
 }
 
-fn read_count(x: &TimeSeriesView<'_>, t: usize, dim: usize) -> Result<f64, CpdError> {
-    normalize_count(read_value(x, t, dim)?, t, dim)
+fn read_binary(x: &TimeSeriesView<'_>, t: usize, dim: usize) -> Result<usize, CpdError> {
+    parse_binary(read_value(x, t, dim)?, t, dim)
 }
 
 fn cache_overflow_err(n: usize, d: usize) -> CpdError {
     CpdError::resource_limit(format!(
-        "cache size overflow while planning PoissonCache for n={n}, d={d}"
+        "cache size overflow while planning BernoulliCache for n={n}, d={d}"
     ))
 }
 
-impl CostModel for CostPoissonRate {
-    type Cache = PoissonCache;
+impl CostModel for CostBernoulli {
+    type Cache = BernoulliCache;
 
     fn name(&self) -> &'static str {
-        "poisson_rate"
+        "bernoulli"
     }
 
     fn validate(&self, x: &TimeSeriesView<'_>) -> Result<(), CpdError> {
         if x.n == 0 {
             return Err(CpdError::invalid_input(
-                "CostPoissonRate requires n >= 1; got n=0",
+                "CostBernoulli requires n >= 1; got n=0",
             ));
         }
         if x.d == 0 {
             return Err(CpdError::invalid_input(
-                "CostPoissonRate requires d >= 1; got d=0",
+                "CostBernoulli requires d >= 1; got d=0",
             ));
         }
 
         if x.has_missing() {
             return Err(CpdError::invalid_input(format!(
-                "CostPoissonRate does not support missing values: effective_missing_count={}",
+                "CostBernoulli does not support missing values: effective_missing_count={}",
                 x.n_missing()
             )));
         }
 
         for dim in 0..x.d {
             for t in 0..x.n {
-                let _ = read_count(x, t, dim)?;
+                let _ = read_binary(x, t, dim)?;
             }
         }
 
@@ -272,7 +237,7 @@ impl CostModel for CostPoissonRate {
 
         if matches!(policy, CachePolicy::Approximate { .. }) {
             return Err(CpdError::not_supported(
-                "CostPoissonRate does not support CachePolicy::Approximate",
+                "CostBernoulli does not support CachePolicy::Approximate",
             ));
         }
 
@@ -284,7 +249,7 @@ impl CostModel for CostPoissonRate {
             && required_bytes > *max_bytes
         {
             return Err(CpdError::resource_limit(format!(
-                "CostPoissonRate cache requires {} bytes, exceeds budget {} bytes",
+                "CostBernoulli cache requires {} bytes, exceeds budget {} bytes",
                 required_bytes, max_bytes
             )));
         }
@@ -296,27 +261,23 @@ impl CostModel for CostPoissonRate {
             .checked_mul(x.d)
             .ok_or_else(|| cache_overflow_err(x.n, x.d))?;
 
-        let mut prefix_sum = Vec::with_capacity(total_prefix_len);
+        let mut prefix_count = Vec::with_capacity(total_prefix_len);
 
         for dim in 0..x.d {
-            let mut series = Vec::with_capacity(x.n);
+            let mut running_count = 0usize;
+            prefix_count.push(running_count);
+
             for t in 0..x.n {
-                series.push(read_count(x, t, dim)?);
+                let bit = read_binary(x, t, dim)?;
+                running_count = running_count
+                    .checked_add(bit)
+                    .ok_or_else(|| cache_overflow_err(x.n, x.d))?;
+                prefix_count.push(running_count);
             }
-
-            let dim_prefix_sum = if matches!(self.repro_mode, ReproMode::Strict) {
-                prefix_sums_kahan(&series)
-            } else {
-                prefix_sums(&series)
-            };
-
-            debug_assert_eq!(dim_prefix_sum.len(), prefix_len_per_dim);
-            validate_prefix_sum(&dim_prefix_sum, dim)?;
-            prefix_sum.extend_from_slice(&dim_prefix_sum);
         }
 
-        Ok(PoissonCache {
-            prefix_sum,
+        Ok(BernoulliCache {
+            prefix_count,
             n: x.n,
             d: x.d,
         })
@@ -332,7 +293,7 @@ impl CostModel for CostPoissonRate {
             None => return usize::MAX,
         };
 
-        match total_prefix_len.checked_mul(std::mem::size_of::<f64>()) {
+        match total_prefix_len.checked_mul(std::mem::size_of::<usize>()) {
             Some(v) => v,
             None => usize::MAX,
         }
@@ -353,28 +314,20 @@ impl CostModel for CostPoissonRate {
             cache.n
         );
 
-        let m = (end - start) as f64;
+        let segment_len = end - start;
+        let segment_len_f64 = segment_len as f64;
         let mut total = 0.0;
 
         for dim in 0..cache.d {
             let base = cache.dim_offset(dim);
-            let prefix_end = cache.prefix_sum[base + end];
-            let prefix_start = cache.prefix_sum[base + start];
-            let raw_sum = prefix_end - prefix_start;
-            let sum = if raw_sum >= 0.0 {
-                raw_sum
-            } else {
-                let tol = sum_tolerance(prefix_end, prefix_start);
-                if raw_sum < -tol {
-                    return f64::INFINITY;
-                }
-                0.0
-            };
-            if sum == 0.0 {
-                continue;
-            }
-            let lambda = sum / m;
-            total += sum - sum * lambda.ln();
+            let ones = cache.prefix_count[base + end] - cache.prefix_count[base + start];
+            let zeros = segment_len - ones;
+
+            let p_hat = (ones as f64) / segment_len_f64;
+            let log_p = p_hat.max(PROB_FLOOR).ln();
+            let log_one_minus_p = (1.0 - p_hat).max(PROB_FLOOR).ln();
+
+            total -= (ones as f64) * log_p + (zeros as f64) * log_one_minus_p;
         }
 
         total
@@ -384,8 +337,7 @@ impl CostModel for CostPoissonRate {
 #[cfg(test)]
 mod tests {
     use super::{
-        CostPoissonRate, INTEGER_TOL, PoissonCache, cache_overflow_err, read_value,
-        validate_prefix_sum,
+        BINARY_TOL, BernoulliCache, CostBernoulli, PROB_FLOOR, cache_overflow_err, read_value,
     };
     use crate::model::CostModel;
     use cpd_core::{
@@ -439,22 +391,22 @@ mod tests {
         .expect("test view should be valid")
     }
 
-    fn naive_poisson_univariate(values: &[f64], start: usize, end: usize) -> f64 {
+    fn naive_bernoulli(values: &[f64], start: usize, end: usize) -> f64 {
         let segment = &values[start..end];
-        let sum: f64 = segment.iter().sum();
-        if sum <= 0.0 {
-            return 0.0;
-        }
-        let m = segment.len() as f64;
-        let lambda = sum / m;
-        sum - sum * lambda.ln()
+        let segment_len = segment.len() as f64;
+        let ones = segment.iter().copied().sum::<f64>();
+        let zeros = segment_len - ones;
+        let p_hat = ones / segment_len;
+        let log_p = p_hat.max(PROB_FLOOR).ln();
+        let log_one_minus_p = (1.0 - p_hat).max(PROB_FLOOR).ln();
+        -(ones * log_p + zeros * log_one_minus_p)
     }
 
-    fn synthetic_multivariate_counts(n: usize, d: usize) -> Vec<f64> {
+    fn synthetic_multivariate_binary(n: usize, d: usize) -> Vec<f64> {
         let mut values = Vec::with_capacity(n * d);
         for t in 0..n {
             for dim in 0..d {
-                values.push(((t * (dim + 1)) % 17) as f64);
+                values.push(((t + dim) % 2) as f64);
             }
         }
         values
@@ -473,8 +425,8 @@ mod tests {
 
     #[test]
     fn trait_contract_and_defaults() {
-        let model = CostPoissonRate::default();
-        assert_eq!(model.name(), "poisson_rate");
+        let model = CostBernoulli::default();
+        assert_eq!(model.name(), "bernoulli");
         assert_eq!(model.repro_mode, ReproMode::Balanced);
         assert_eq!(model.missing_support(), MissingSupport::Reject);
         assert!(!model.supports_approx_cache());
@@ -488,23 +440,8 @@ mod tests {
     }
 
     #[test]
-    fn validate_prefix_sum_rejects_non_finite_and_non_monotonic_sequences() {
-        let non_finite = vec![0.0, 1.0, f64::INFINITY];
-        let err_non_finite =
-            validate_prefix_sum(&non_finite, 0).expect_err("non-finite prefix should fail");
-        assert!(matches!(err_non_finite, CpdError::NumericalIssue(_)));
-        assert!(err_non_finite.to_string().contains("non-finite"));
-
-        let non_monotonic = vec![0.0, 2.0, 1.0];
-        let err_non_monotonic =
-            validate_prefix_sum(&non_monotonic, 0).expect_err("non-monotonic prefix should fail");
-        assert!(matches!(err_non_monotonic, CpdError::NumericalIssue(_)));
-        assert!(err_non_monotonic.to_string().contains("non-monotonic"));
-    }
-
-    #[test]
     fn validate_rejects_missing_effective_values() {
-        let values = [1.0, f64::NAN, 3.0];
+        let values = [1.0, f64::NAN, 0.0];
         let view = make_f64_view(
             &values,
             3,
@@ -512,7 +449,7 @@ mod tests {
             MemoryLayout::CContiguous,
             MissingPolicy::Ignore,
         );
-        let err = CostPoissonRate::default()
+        let err = CostBernoulli::default()
             .validate(&view)
             .expect_err("missing values should be rejected");
         assert!(matches!(err, CpdError::InvalidInput(_)));
@@ -520,21 +457,8 @@ mod tests {
     }
 
     #[test]
-    fn validate_rejects_negative_and_non_integer_values() {
-        let negative = [0.0, -1.0, 2.0, 3.0];
-        let negative_view = make_f64_view(
-            &negative,
-            4,
-            1,
-            MemoryLayout::CContiguous,
-            MissingPolicy::Error,
-        );
-        let negative_err = CostPoissonRate::default()
-            .validate(&negative_view)
-            .expect_err("negative counts should fail");
-        assert!(negative_err.to_string().contains("non-negative"));
-
-        let fractional = [0.0, 1.25, 2.0, 3.0];
+    fn validate_rejects_non_binary_values() {
+        let fractional = [0.0, 0.5, 1.0, 0.0];
         let fractional_view = make_f64_view(
             &fractional,
             4,
@@ -542,17 +466,30 @@ mod tests {
             MemoryLayout::CContiguous,
             MissingPolicy::Error,
         );
-        let fractional_err = CostPoissonRate::default()
+        let fractional_err = CostBernoulli::default()
             .validate(&fractional_view)
-            .expect_err("fractional counts should fail");
-        assert!(fractional_err.to_string().contains("integer-valued"));
+            .expect_err("non-binary value should fail");
+        assert!(fractional_err.to_string().contains("binary observations"));
+
+        let too_large = [0.0, 1.0 + 2.0 * BINARY_TOL, 1.0, 0.0];
+        let too_large_view = make_f64_view(
+            &too_large,
+            4,
+            1,
+            MemoryLayout::CContiguous,
+            MissingPolicy::Error,
+        );
+        let too_large_err = CostBernoulli::default()
+            .validate(&too_large_view)
+            .expect_err("out-of-tolerance value should fail");
+        assert!(too_large_err.to_string().contains("binary observations"));
     }
 
     #[test]
-    fn validate_accepts_integer_valued_f32_and_f64() {
-        let model = CostPoissonRate::default();
+    fn validate_accepts_binary_f32_and_f64() {
+        let model = CostBernoulli::default();
 
-        let f32_values = [0.0_f32, 1.0, 2.0, 3.0];
+        let f32_values = [0.0_f32, 1.0, 0.0, 1.0];
         let f32_view = make_f32_view(
             &f32_values,
             4,
@@ -560,9 +497,9 @@ mod tests {
             MemoryLayout::CContiguous,
             MissingPolicy::Error,
         );
-        model.validate(&f32_view).expect("f32 integer counts");
+        model.validate(&f32_view).expect("f32 binary inputs");
 
-        let f64_values = [0.0_f64, 1.0, 2.0, 3.0];
+        let f64_values = [0.0_f64, 1.0, 0.0, 1.0];
         let f64_view = make_f64_view(
             &f64_values,
             4,
@@ -570,13 +507,13 @@ mod tests {
             MemoryLayout::CContiguous,
             MissingPolicy::Error,
         );
-        model.validate(&f64_view).expect("f64 integer counts");
+        model.validate(&f64_view).expect("f64 binary inputs");
     }
 
     #[test]
-    fn known_answer_univariate_and_zero_rate_segment() {
-        let model = CostPoissonRate::default();
-        let values = [0.0, 1.0, 2.0, 3.0];
+    fn known_answer_and_degenerate_probability_segments() {
+        let model = CostBernoulli::default();
+        let values = [0.0, 1.0, 1.0, 0.0];
         let view = make_f64_view(
             &values,
             4,
@@ -589,30 +526,47 @@ mod tests {
             .expect("precompute should succeed");
 
         let full = model.segment_cost(&cache, 0, 4);
-        assert_close(full, 6.0 - 6.0 * 1.5_f64.ln(), 1e-12);
+        assert_close(full, 4.0 * 2.0_f64.ln(), 1e-12);
 
-        let sub = model.segment_cost(&cache, 1, 3);
-        assert_close(sub, 3.0 - 3.0 * 1.5_f64.ln(), 1e-12);
+        let sub = model.segment_cost(&cache, 0, 2);
+        assert_close(sub, 2.0 * 2.0_f64.ln(), 1e-12);
 
-        let zero_values = [0.0, 0.0, 0.0, 0.0];
-        let zero_view = make_f64_view(
-            &zero_values,
+        let all_ones = [1.0, 1.0, 1.0, 1.0];
+        let all_ones_view = make_f64_view(
+            &all_ones,
             4,
             1,
             MemoryLayout::CContiguous,
             MissingPolicy::Error,
         );
-        let zero_cache = model
-            .precompute(&zero_view, &CachePolicy::Full)
+        let all_ones_cache = model
+            .precompute(&all_ones_view, &CachePolicy::Full)
             .expect("precompute should succeed");
-        assert_close(model.segment_cost(&zero_cache, 0, 4), 0.0, 1e-15);
+        let all_ones_cost = model.segment_cost(&all_ones_cache, 0, 4);
+        assert!(all_ones_cost.is_finite());
+        assert_close(all_ones_cost, 0.0, 1e-15);
+
+        let all_zeros = [0.0, 0.0, 0.0, 0.0];
+        let all_zeros_view = make_f64_view(
+            &all_zeros,
+            4,
+            1,
+            MemoryLayout::CContiguous,
+            MissingPolicy::Error,
+        );
+        let all_zeros_cache = model
+            .precompute(&all_zeros_view, &CachePolicy::Full)
+            .expect("precompute should succeed");
+        let all_zeros_cost = model.segment_cost(&all_zeros_cache, 0, 4);
+        assert!(all_zeros_cost.is_finite());
+        assert_close(all_zeros_cost, 0.0, 1e-15);
     }
 
     #[test]
     fn segment_cost_matches_naive_on_deterministic_queries() {
-        let model = CostPoissonRate::default();
-        let n = 256;
-        let values: Vec<f64> = (0..n).map(|i| ((i * 7) % 23) as f64).collect();
+        let model = CostBernoulli::default();
+        let n = 512;
+        let values: Vec<f64> = (0..n).map(|i| (i % 2) as f64).collect();
         let view = make_f64_view(
             &values,
             n,
@@ -624,7 +578,7 @@ mod tests {
             .precompute(&view, &CachePolicy::Full)
             .expect("precompute should succeed");
 
-        let mut state = 0x1020_3040_5060_7080_u64;
+        let mut state = 0xA5A5_A5A5_5A5A_5A5A_u64;
         for _ in 0..600 {
             let a = (lcg_next(&mut state) as usize) % n;
             let b = (lcg_next(&mut state) as usize) % n;
@@ -635,20 +589,20 @@ mod tests {
             }
 
             let fast = model.segment_cost(&cache, start, end);
-            let naive = naive_poisson_univariate(&values, start, end);
-            assert_close(fast, naive, 1e-9);
+            let naive = naive_bernoulli(&values, start, end);
+            assert_close(fast, naive, 1e-12);
         }
     }
 
     #[test]
     fn multivariate_matches_univariate_sum_for_d1_d4_d16() {
-        let model = CostPoissonRate::default();
-        let n = 9;
-        let start = 2;
-        let end = 8;
+        let model = CostBernoulli::default();
+        let n = 12;
+        let start = 3;
+        let end = 11;
 
         for d in [1_usize, 4, 16] {
-            let values = synthetic_multivariate_counts(n, d);
+            let values = synthetic_multivariate_binary(n, d);
             let view = make_f64_view(
                 &values,
                 n,
@@ -683,9 +637,9 @@ mod tests {
 
     #[test]
     fn layout_coverage_c_f_and_strided() {
-        let model = CostPoissonRate::default();
+        let model = CostBernoulli::default();
 
-        let c_values = vec![0.0, 1.0, 2.0, 3.0, 4.0, 5.0];
+        let c_values = vec![0.0, 1.0, 1.0, 0.0, 0.0, 1.0];
         let c_view = make_f64_view(
             &c_values,
             3,
@@ -697,7 +651,7 @@ mod tests {
             .precompute(&c_view, &CachePolicy::Full)
             .expect("C precompute should succeed");
 
-        let f_values = vec![0.0, 2.0, 4.0, 1.0, 3.0, 5.0];
+        let f_values = vec![0.0, 1.0, 0.0, 1.0, 0.0, 1.0];
         let f_view = make_f64_view(
             &f_values,
             3,
@@ -709,7 +663,7 @@ mod tests {
             .precompute(&f_view, &CachePolicy::Full)
             .expect("F precompute should succeed");
 
-        let s_values = vec![0.0, 1.0, 2.0, 3.0, 4.0, 5.0];
+        let s_values = vec![0.0, 1.0, 1.0, 0.0, 0.0, 1.0];
         let s_view = make_f64_view(
             &s_values,
             3,
@@ -738,8 +692,8 @@ mod tests {
 
     #[test]
     fn precompute_rejects_approximate_and_budget_exceeded() {
-        let model = CostPoissonRate::default();
-        let values = [0.0, 1.0, 2.0, 3.0, 4.0];
+        let model = CostBernoulli::default();
+        let values = [0.0, 1.0, 1.0, 0.0, 1.0];
         let view = make_f64_view(
             &values,
             5,
@@ -772,26 +726,8 @@ mod tests {
     }
 
     #[test]
-    fn precompute_rejects_non_finite_prefix_totals() {
-        let model = CostPoissonRate::default();
-        let values = [f64::MAX, f64::MAX];
-        let view = make_f64_view(
-            &values,
-            2,
-            1,
-            MemoryLayout::CContiguous,
-            MissingPolicy::Error,
-        );
-        let err = model
-            .precompute(&view, &CachePolicy::Full)
-            .expect_err("overflowed prefix sums should fail");
-        assert!(matches!(err, CpdError::NumericalIssue(_)));
-        assert!(err.to_string().contains("non-finite"));
-    }
-
-    #[test]
     fn worst_case_cache_bytes_matches_formula() {
-        let model = CostPoissonRate::default();
+        let model = CostBernoulli::default();
         let values = vec![0.0; 16];
         let view = make_f64_view(
             &values,
@@ -800,13 +736,13 @@ mod tests {
             MemoryLayout::CContiguous,
             MissingPolicy::Error,
         );
-        let expected = (8 + 1) * 2 * std::mem::size_of::<f64>();
+        let expected = (8 + 1) * 2 * std::mem::size_of::<usize>();
         assert_eq!(model.worst_case_cache_bytes(&view), expected);
     }
 
     #[test]
     fn read_value_f32_layout_paths_and_errors() {
-        let c_values = [1.0_f32, 2.0, 3.0, 4.0];
+        let c_values = [0.0_f32, 1.0, 1.0, 0.0];
         let c_view = make_f32_view(
             &c_values,
             2,
@@ -816,13 +752,13 @@ mod tests {
         );
         assert_close(
             read_value(&c_view, 1, 0).expect("C f32 read should succeed"),
-            3.0,
+            1.0,
             1e-12,
         );
         let c_oob = read_value(&c_view, 1, 2).expect_err("C f32 oob expected");
         assert!(c_oob.to_string().contains("out of bounds"));
 
-        let f_values = [1.0_f32, 3.0, 2.0, 4.0];
+        let f_values = [0.0_f32, 1.0, 1.0, 0.0];
         let f_view = make_f32_view(
             &f_values,
             2,
@@ -832,16 +768,16 @@ mod tests {
         );
         assert_close(
             read_value(&f_view, 1, 0).expect("F f32 read should succeed"),
-            3.0,
+            1.0,
             1e-12,
         );
     }
 
     #[test]
     fn segment_cost_panics_when_start_ge_end() {
-        let model = CostPoissonRate::default();
-        let cache = PoissonCache {
-            prefix_sum: vec![0.0, 1.0, 3.0],
+        let model = CostBernoulli::default();
+        let cache = BernoulliCache {
+            prefix_count: vec![0, 1, 1],
             n: 2,
             d: 1,
         };
@@ -852,9 +788,9 @@ mod tests {
 
     #[test]
     fn segment_cost_panics_when_end_exceeds_n() {
-        let model = CostPoissonRate::default();
-        let cache = PoissonCache {
-            prefix_sum: vec![0.0, 1.0, 3.0],
+        let model = CostBernoulli::default();
+        let cache = BernoulliCache {
+            prefix_count: vec![0, 1, 1],
             n: 2,
             d: 1,
         };
@@ -864,34 +800,22 @@ mod tests {
     }
 
     #[test]
-    fn segment_cost_returns_infinity_for_materially_negative_segment_sum() {
-        let model = CostPoissonRate::default();
-        let cache = PoissonCache {
-            prefix_sum: vec![0.0, 100.0, 10.0],
-            n: 2,
-            d: 1,
-        };
+    fn extreme_probability_segments_remain_finite() {
+        let model = CostBernoulli::default();
+        let mut values = vec![0.0; 1024];
+        values[0] = 1.0;
 
-        let cost = model.segment_cost(&cache, 1, 2);
-        assert!(
-            cost.is_infinite() && cost.is_sign_positive(),
-            "expected +inf for materially negative segment sum, got {cost}"
-        );
-    }
-
-    #[test]
-    fn integer_tolerance_allows_tiny_rounding_noise() {
-        let model = CostPoissonRate::default();
-        let values = [1.0, 2.0 + 0.5 * INTEGER_TOL, 3.0];
         let view = make_f64_view(
             &values,
-            3,
+            values.len(),
             1,
             MemoryLayout::CContiguous,
             MissingPolicy::Error,
         );
-        model
-            .validate(&view)
-            .expect("tiny rounding noise should be accepted");
+        let cache = model
+            .precompute(&view, &CachePolicy::Full)
+            .expect("precompute should succeed");
+        let cost = model.segment_cost(&cache, 0, values.len());
+        assert!(cost.is_finite(), "expected finite cost, got {cost}");
     }
 }

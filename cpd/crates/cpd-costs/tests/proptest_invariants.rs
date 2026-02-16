@@ -6,7 +6,8 @@ use cpd_core::{
     CachePolicy, CpdError, MemoryLayout, MissingPolicy, ReproMode, TimeIndex, TimeSeriesView,
 };
 use cpd_costs::{
-    CostL2Mean, CostModel, CostNIGMarginal, CostNormalMeanVar, CostPoissonRate, NIGPrior,
+    CostBernoulli, CostL2Mean, CostModel, CostNIGMarginal, CostNormalMeanVar, CostPoissonRate,
+    NIGPrior,
 };
 use proptest::prelude::*;
 use proptest::test_runner::{Config as ProptestConfig, FileFailurePersistence};
@@ -14,6 +15,7 @@ use proptest::test_runner::{Config as ProptestConfig, FileFailurePersistence};
 const ABS_TOL: f64 = 1e-7;
 const REL_TOL: f64 = 1e-6;
 const VAR_FLOOR: f64 = f64::EPSILON * 1e6;
+const BERNOULLI_PROB_FLOOR: f64 = f64::EPSILON * 1e6;
 const MIN_PROPTEST_CASES: u32 = 1000;
 const LOG_2PI: f64 = 1.8378770664093453;
 
@@ -114,6 +116,17 @@ fn naive_poisson(values: &[f64], start: usize, end: usize) -> f64 {
     let len = segment.len() as f64;
     let lambda = sum / len;
     sum - sum * lambda.ln()
+}
+
+fn naive_bernoulli(values: &[f64], start: usize, end: usize) -> f64 {
+    let segment = &values[start..end];
+    let len = segment.len() as f64;
+    let ones: f64 = segment.iter().sum();
+    let zeros = len - ones;
+    let p_hat = ones / len;
+    let log_p = p_hat.max(BERNOULLI_PROB_FLOOR).ln();
+    let log_one_minus_p = (1.0 - p_hat).max(BERNOULLI_PROB_FLOOR).ln();
+    -(ones * log_p + zeros * log_one_minus_p)
 }
 
 fn naive_nig_default_prior(values: &[f64], start: usize, end: usize) -> f64 {
@@ -235,6 +248,20 @@ fn univariate_count_segment_case_strategy(
 ) -> impl Strategy<Value = (Vec<f64>, usize, usize)> {
     prop::collection::vec(0u16..80u16, 8..96).prop_flat_map(move |counts| {
         let values: Vec<f64> = counts.into_iter().map(f64::from).collect();
+        let n = values.len();
+        (0usize..=(n - min_segment_len)).prop_flat_map(move |start| {
+            let values_for_start = values.clone();
+            ((start + min_segment_len)..=n)
+                .prop_map(move |end| (values_for_start.clone(), start, end))
+        })
+    })
+}
+
+fn univariate_binary_segment_case_strategy(
+    min_segment_len: usize,
+) -> impl Strategy<Value = (Vec<f64>, usize, usize)> {
+    prop::collection::vec(0u8..=1u8, 8..96).prop_flat_map(move |bits| {
+        let values: Vec<f64> = bits.into_iter().map(f64::from).collect();
         let n = values.len();
         (0usize..=(n - min_segment_len)).prop_flat_map(move |start| {
             let values_for_start = values.clone();
@@ -396,6 +423,24 @@ proptest! {
         let actual_first = model.segment_cost(&cache, start, end);
         let actual_second = model.segment_cost(&cache, start, end);
         let expected = naive_poisson(&values, start, end);
+
+        prop_assert!(relative_close(actual_first, expected));
+        prop_assert!(relative_close(actual_first, actual_second));
+    }
+
+    #[test]
+    fn bernoulli_segment_cost_is_deterministic_and_matches_naive(
+        (values, start, end) in univariate_binary_segment_case_strategy(1),
+    ) {
+        let view = make_univariate_view(&values);
+        let model = CostBernoulli::new(ReproMode::Balanced);
+        let cache = model
+            .precompute(&view, &CachePolicy::Full)
+            .expect("precompute should succeed for valid generated data");
+
+        let actual_first = model.segment_cost(&cache, start, end);
+        let actual_second = model.segment_cost(&cache, start, end);
+        let expected = naive_bernoulli(&values, start, end);
 
         prop_assert!(relative_close(actual_first, expected));
         prop_assert!(relative_close(actual_first, actual_second));
