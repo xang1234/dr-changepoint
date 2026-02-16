@@ -2,6 +2,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod ar;
 pub mod bernoulli;
 pub mod l2;
 pub mod linear;
@@ -10,6 +11,7 @@ pub mod nig;
 pub mod normal;
 pub mod poisson;
 
+pub use ar::{ARCache, CostAR};
 pub use bernoulli::{BernoulliCache, CostBernoulli};
 pub use cpd_core::MissingSupport;
 pub use l2::{CostL2Mean, L2Cache};

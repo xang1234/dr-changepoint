@@ -927,7 +927,7 @@ mod tests {
         BudgetMode, Constraints, DTypeView, ExecutionContext, MemoryLayout, MissingPolicy,
         OfflineDetector, Penalty, ProgressSink, ReproMode, Stopping, TimeIndex, TimeSeriesView,
     };
-    use cpd_costs::{CostL2Mean, CostNormalMeanVar};
+    use cpd_costs::{CostAR, CostL2Mean, CostNormalMeanVar};
     use std::thread;
     use std::time::Duration;
 
@@ -961,6 +961,19 @@ mod tests {
         for window in values.windows(2) {
             assert!(window[0] < window[1], "not strictly increasing: {values:?}");
         }
+    }
+
+    fn ar1_mean_shift_signal(n: usize, breakpoint: usize) -> Vec<f64> {
+        let phi = 0.85;
+        let mut values = Vec::with_capacity(n);
+        values.push(0.0);
+        for t in 1..n {
+            let mu = if t < breakpoint { 0.0 } else { 4.5 };
+            let prev = values[t - 1];
+            let eps = 0.2 * (0.17 * t as f64).sin() + 0.05 * (0.03 * t as f64).cos();
+            values.push(mu + phi * (prev - mu) + eps);
+        }
+        values
     }
 
     #[test]
@@ -1106,6 +1119,45 @@ mod tests {
         let ctx = ExecutionContext::new(&constraints);
         let result = detector.detect(&view, &ctx).expect("detect should succeed");
         assert_eq!(result.breakpoints, vec![10, 20]);
+    }
+
+    #[test]
+    fn ar_cost_detects_mean_shift_under_autocorrelation() {
+        let detector = Pelt::new(
+            CostAR::default(),
+            PeltConfig {
+                stopping: Stopping::KnownK(1),
+                params_per_segment: 3,
+                cancel_check_every: 8,
+            },
+        )
+        .expect("config should be valid");
+
+        let n = 240;
+        let breakpoint = 120;
+        let values = ar1_mean_shift_signal(n, breakpoint);
+        let view = make_f64_view(
+            &values,
+            values.len(),
+            1,
+            MemoryLayout::CContiguous,
+            MissingPolicy::Error,
+        );
+
+        let constraints = Constraints {
+            min_segment_len: 20,
+            max_change_points: Some(1),
+            ..Constraints::default()
+        };
+        let ctx = ExecutionContext::new(&constraints);
+        let result = detector.detect(&view, &ctx).expect("detect should succeed");
+        assert_eq!(result.change_points.len(), 1);
+        let detected = result.change_points[0];
+        assert!(
+            detected.abs_diff(breakpoint) <= 8,
+            "expected change point near {breakpoint}, got {detected}"
+        );
+        assert_eq!(result.breakpoints.last().copied(), Some(n));
     }
 
     #[test]
