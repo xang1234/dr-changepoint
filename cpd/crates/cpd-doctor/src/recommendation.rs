@@ -15,6 +15,7 @@ use cpd_online::{
     PageHinkleyConfig, PoissonGammaPrior,
 };
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::OnceLock;
 
 const BINARY_TOLERANCE: f64 = 1.0e-9;
 const FAMILY_THRESHOLD: f64 = 0.98;
@@ -24,7 +25,6 @@ const CONFIDENCE_CEILING: f64 = 0.99;
 const OOD_GATING_LAMBDA: f64 = 0.90;
 const OOD_GATING_MAX_PENALTY: f64 = 0.80;
 const DEFAULT_CALIBRATION_BINS: usize = 10;
-const CONFIDENCE_FORMULA_TEXT: &str = "confidence = clamp((intercept_family + slope_family * heuristic_confidence) * (1 - ood_penalty), 0.01, 0.99), where ood_penalty = clamp(1 - exp(-0.90 * diagnostic_divergence), 0.0, 0.8)";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Objective {
@@ -41,6 +41,8 @@ pub enum CalibrationFamily {
     Autocorrelated,
     Seasonal,
     Multivariate,
+    Binary,
+    Count,
 }
 
 impl CalibrationFamily {
@@ -51,6 +53,8 @@ impl CalibrationFamily {
             Self::Autocorrelated => "autocorrelated",
             Self::Seasonal => "seasonal",
             Self::Multivariate => "multivariate",
+            Self::Binary => "binary",
+            Self::Count => "count",
         }
     }
 }
@@ -81,7 +85,12 @@ pub struct CalibrationMetrics {
 
 /// Documented confidence formula used by `recommend`.
 pub fn confidence_formula() -> &'static str {
-    CONFIDENCE_FORMULA_TEXT
+    static FORMULA: OnceLock<String> = OnceLock::new();
+    FORMULA.get_or_init(|| {
+        format!(
+            "confidence = clamp((intercept_family + slope_family * heuristic_confidence) * (1 - ood_penalty), {CONFIDENCE_FLOOR:.2}, {CONFIDENCE_CEILING:.2}), where ood_penalty = clamp(1 - exp(-{OOD_GATING_LAMBDA:.2} * diagnostic_divergence), 0.0, {OOD_GATING_MAX_PENALTY:.1})"
+        )
+    })
 }
 
 /// Offline calibration pipeline utility.
@@ -105,6 +114,9 @@ pub fn evaluate_calibration(
         )));
     }
 
+    let mut overall = CalibrationAccumulator::new(bins);
+    let mut grouped = BTreeMap::<CalibrationFamily, CalibrationAccumulator>::new();
+
     for (idx, observation) in observations.iter().enumerate() {
         let predicted = observation.predicted_confidence;
         if !predicted.is_finite() || !(0.0..=1.0).contains(&predicted) {
@@ -112,23 +124,35 @@ pub fn evaluate_calibration(
                 "observation[{idx}].predicted_confidence must be finite and within [0, 1], got {predicted}"
             )));
         }
-    }
 
-    let (ece, brier) = calibration_errors(observations, bins);
-    let mut grouped = BTreeMap::<CalibrationFamily, Vec<CalibrationObservation>>::new();
-    for observation in observations {
+        overall.push(
+            predicted,
+            if observation.top1_within_tolerance {
+                1.0
+            } else {
+                0.0
+            },
+        );
         grouped
             .entry(observation.family)
-            .or_default()
-            .push(observation.clone());
+            .or_insert_with(|| CalibrationAccumulator::new(bins))
+            .push(
+                predicted,
+                if observation.top1_within_tolerance {
+                    1.0
+                } else {
+                    0.0
+                },
+            );
     }
+    let (ece, brier, _) = overall.metrics();
 
     let mut per_family = Vec::with_capacity(grouped.len());
-    for (family, samples) in grouped {
-        let (family_ece, family_brier) = calibration_errors(&samples, bins);
+    for (family, accumulator) in grouped {
+        let (family_ece, family_brier, count) = accumulator.metrics();
         per_family.push(FamilyCalibrationMetrics {
             family,
-            count: samples.len(),
+            count,
             ece: family_ece,
             brier: family_brier,
         });
@@ -143,42 +167,56 @@ pub fn evaluate_calibration(
     })
 }
 
-fn calibration_errors(observations: &[CalibrationObservation], bins: usize) -> (f64, f64) {
-    if observations.is_empty() {
-        return (0.0, 0.0);
-    }
+#[derive(Debug)]
+struct CalibrationAccumulator {
+    bucket_count: Vec<usize>,
+    bucket_confidence: Vec<f64>,
+    bucket_accuracy: Vec<f64>,
+    brier_sum: f64,
+    count: usize,
+}
 
-    let mut bucket_count = vec![0usize; bins];
-    let mut bucket_confidence = vec![0.0; bins];
-    let mut bucket_accuracy = vec![0.0; bins];
-    let mut brier_sum = 0.0;
-
-    for observation in observations {
-        let idx = ((observation.predicted_confidence * bins as f64).floor() as usize).min(bins - 1);
-        let observed = if observation.top1_within_tolerance {
-            1.0
-        } else {
-            0.0
-        };
-        bucket_count[idx] = bucket_count[idx].saturating_add(1);
-        bucket_confidence[idx] += observation.predicted_confidence;
-        bucket_accuracy[idx] += observed;
-        brier_sum += (observation.predicted_confidence - observed).powi(2);
-    }
-
-    let total = observations.len() as f64;
-    let mut ece = 0.0;
-    for bucket in 0..bins {
-        if bucket_count[bucket] == 0 {
-            continue;
+impl CalibrationAccumulator {
+    fn new(bins: usize) -> Self {
+        Self {
+            bucket_count: vec![0usize; bins],
+            bucket_confidence: vec![0.0; bins],
+            bucket_accuracy: vec![0.0; bins],
+            brier_sum: 0.0,
+            count: 0,
         }
-        let inv = 1.0 / bucket_count[bucket] as f64;
-        let avg_confidence = bucket_confidence[bucket] * inv;
-        let avg_accuracy = bucket_accuracy[bucket] * inv;
-        ece += (bucket_count[bucket] as f64 / total) * (avg_accuracy - avg_confidence).abs();
     }
 
-    (ece, brier_sum / total)
+    fn push(&mut self, predicted_confidence: f64, observed: f64) {
+        let bins = self.bucket_count.len();
+        let idx = ((predicted_confidence * bins as f64).floor() as usize).min(bins - 1);
+        self.bucket_count[idx] = self.bucket_count[idx].saturating_add(1);
+        self.bucket_confidence[idx] += predicted_confidence;
+        self.bucket_accuracy[idx] += observed;
+        self.brier_sum += (predicted_confidence - observed).powi(2);
+        self.count = self.count.saturating_add(1);
+    }
+
+    fn metrics(self) -> (f64, f64, usize) {
+        if self.count == 0 {
+            return (0.0, 0.0, 0);
+        }
+
+        let total = self.count as f64;
+        let mut ece = 0.0;
+        for bucket in 0..self.bucket_count.len() {
+            if self.bucket_count[bucket] == 0 {
+                continue;
+            }
+            let inv = 1.0 / self.bucket_count[bucket] as f64;
+            let avg_confidence = self.bucket_confidence[bucket] * inv;
+            let avg_accuracy = self.bucket_accuracy[bucket] * inv;
+            ece +=
+                (self.bucket_count[bucket] as f64 / total) * (avg_accuracy - avg_confidence).abs();
+        }
+
+        (ece, self.brier_sum / total, self.count)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -621,6 +659,12 @@ fn select_calibration_family(
     if dimension_count >= 4 {
         return CalibrationFamily::Multivariate;
     }
+    if hints.binary_like {
+        return CalibrationFamily::Binary;
+    }
+    if hints.count_like {
+        return CalibrationFamily::Count;
+    }
 
     let seasonal_strength = strongest_period_strength(summary);
     let heavy_tail_score = (summary.kurtosis_proxy / 4.0)
@@ -637,7 +681,7 @@ fn select_calibration_family(
     if seasonal_strength >= 0.40 {
         return CalibrationFamily::Seasonal;
     }
-    if hints.binary_like || hints.count_like || flags.autocorrelated {
+    if flags.autocorrelated {
         if heavy_tail_score > autocorr_score + 0.25 {
             return CalibrationFamily::HeavyTailed;
         }
@@ -883,6 +927,96 @@ fn calibration_profile(family: CalibrationFamily) -> CalibrationProfile {
                 lower: 0.0,
                 upper: 0.75,
                 weight: 0.7,
+            },
+        },
+        CalibrationFamily::Binary => CalibrationProfile {
+            family,
+            intercept: 0.04,
+            slope: 0.88,
+            nan_rate: CalibrationRange {
+                lower: 0.0,
+                upper: 0.12,
+                weight: 1.0,
+            },
+            kurtosis_proxy: CalibrationRange {
+                lower: 0.2,
+                upper: 30.0,
+                weight: 0.3,
+            },
+            outlier_rate_iqr: CalibrationRange {
+                lower: 0.0,
+                upper: 0.15,
+                weight: 0.4,
+            },
+            mad_to_std_ratio: CalibrationRange {
+                lower: 0.0,
+                upper: 1.6,
+                weight: 0.3,
+            },
+            lag1_autocorr: CalibrationRange {
+                lower: -1.0,
+                upper: 1.0,
+                weight: 0.3,
+            },
+            change_density_score: CalibrationRange {
+                lower: 0.0,
+                upper: 1.0,
+                weight: 0.8,
+            },
+            regime_change_proxy: CalibrationRange {
+                lower: 0.0,
+                upper: 3.0,
+                weight: 0.8,
+            },
+            dominant_period_strength: CalibrationRange {
+                lower: 0.0,
+                upper: 1.0,
+                weight: 0.4,
+            },
+        },
+        CalibrationFamily::Count => CalibrationProfile {
+            family,
+            intercept: 0.04,
+            slope: 0.87,
+            nan_rate: CalibrationRange {
+                lower: 0.0,
+                upper: 0.12,
+                weight: 1.0,
+            },
+            kurtosis_proxy: CalibrationRange {
+                lower: 0.5,
+                upper: 20.0,
+                weight: 0.5,
+            },
+            outlier_rate_iqr: CalibrationRange {
+                lower: 0.0,
+                upper: 0.25,
+                weight: 0.7,
+            },
+            mad_to_std_ratio: CalibrationRange {
+                lower: 0.0,
+                upper: 1.8,
+                weight: 0.4,
+            },
+            lag1_autocorr: CalibrationRange {
+                lower: -1.0,
+                upper: 1.0,
+                weight: 0.4,
+            },
+            change_density_score: CalibrationRange {
+                lower: 0.0,
+                upper: 1.0,
+                weight: 0.8,
+            },
+            regime_change_proxy: CalibrationRange {
+                lower: 0.0,
+                upper: 3.0,
+                weight: 0.8,
+            },
+            dominant_period_strength: CalibrationRange {
+                lower: 0.0,
+                upper: 1.0,
+                weight: 0.4,
             },
         },
     }
@@ -2048,6 +2182,27 @@ mod tests {
         u * 2.0 - 1.0
     }
 
+    fn base_summary() -> super::DiagnosticsSummary {
+        super::DiagnosticsSummary {
+            valid_dimensions: 1,
+            nan_rate: 0.01,
+            longest_nan_run: 0,
+            missing_pattern: super::MissingPattern::None,
+            kurtosis_proxy: 2.5,
+            outlier_rate_iqr: 0.01,
+            mad_to_std_ratio: 1.0,
+            lag1_autocorr: 0.10,
+            lagk_autocorr: 0.05,
+            pacf_lagk_proxy: 0.0,
+            residual_lag1_autocorr: 0.05,
+            rolling_mean_drift: 0.0,
+            rolling_variance_drift: 0.0,
+            regime_change_proxy: 0.20,
+            change_density_score: 0.10,
+            dominant_period_hints: vec![],
+        }
+    }
+
     #[test]
     fn recommend_offline_huge_n_prefers_pelt_l2_with_jump_thinning() {
         let n = 120_000;
@@ -2176,6 +2331,12 @@ mod tests {
                     cfg.observation,
                     ObservationModel::Bernoulli { .. }
                 ));
+                assert!(
+                    !recommendations[0]
+                        .warnings
+                        .iter()
+                        .any(|warning| warning.contains("OOD gating"))
+                );
             }
             other => panic!("unexpected top recommendation: {other:?}"),
         }
@@ -2194,9 +2355,53 @@ mod tests {
                 detector: OnlineDetectorConfig::Bocpd(cfg),
             } => {
                 assert!(matches!(cfg.observation, ObservationModel::Poisson { .. }));
+                assert!(
+                    !recommendations[0]
+                        .warnings
+                        .iter()
+                        .any(|warning| warning.contains("OOD gating"))
+                );
             }
             other => panic!("unexpected top recommendation: {other:?}"),
         }
+    }
+
+    #[test]
+    fn select_calibration_family_uses_binary_and_count_families() {
+        let summary = base_summary();
+        let flags = super::SignalFlags {
+            huge_n: false,
+            medium_n: true,
+            autocorrelated: false,
+            heavy_tail: false,
+            change_dense: false,
+            few_strong_changes: false,
+            masking_risk: false,
+            low_signal: false,
+            conflicting_signals: false,
+        };
+
+        let binary_family = super::select_calibration_family(
+            &summary,
+            flags,
+            super::DataHints {
+                binary_like: true,
+                count_like: false,
+            },
+            1,
+        );
+        let count_family = super::select_calibration_family(
+            &summary,
+            flags,
+            super::DataHints {
+                binary_like: false,
+                count_like: true,
+            },
+            1,
+        );
+
+        assert_eq!(binary_family, CalibrationFamily::Binary);
+        assert_eq!(count_family, CalibrationFamily::Count);
     }
 
     #[test]
