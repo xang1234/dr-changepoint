@@ -4,6 +4,7 @@
 
 pub mod bernoulli;
 pub mod l2;
+pub mod linear;
 pub mod model;
 pub mod nig;
 pub mod normal;
@@ -12,6 +13,7 @@ pub mod poisson;
 pub use bernoulli::{BernoulliCache, CostBernoulli};
 pub use cpd_core::MissingSupport;
 pub use l2::{CostL2Mean, L2Cache};
+pub use linear::{CostLinear, LinearCache};
 pub use model::{CachedCost, CostModel};
 pub use nig::{CostNIGMarginal, NIGCache, NIGPrior};
 pub use normal::{CostNormalMeanVar, NormalCache};
