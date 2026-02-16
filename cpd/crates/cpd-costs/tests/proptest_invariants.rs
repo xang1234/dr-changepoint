@@ -5,7 +5,9 @@
 use cpd_core::{
     CachePolicy, CpdError, MemoryLayout, MissingPolicy, ReproMode, TimeIndex, TimeSeriesView,
 };
-use cpd_costs::{CostL2Mean, CostModel, CostNIGMarginal, CostNormalMeanVar, NIGPrior};
+use cpd_costs::{
+    CostL2Mean, CostModel, CostNIGMarginal, CostNormalMeanVar, CostPoissonRate, NIGPrior,
+};
 use proptest::prelude::*;
 use proptest::test_runner::{Config as ProptestConfig, FileFailurePersistence};
 
@@ -101,6 +103,17 @@ fn naive_normal(values: &[f64], start: usize, end: usize) -> f64 {
     let raw_var = sum_sq / len - mean * mean;
     let var = normalize_variance(raw_var);
     len * var.ln()
+}
+
+fn naive_poisson(values: &[f64], start: usize, end: usize) -> f64 {
+    let segment = &values[start..end];
+    let sum: f64 = segment.iter().sum();
+    if sum <= 0.0 {
+        return 0.0;
+    }
+    let len = segment.len() as f64;
+    let lambda = sum / len;
+    sum - sum * lambda.ln()
 }
 
 fn naive_nig_default_prior(values: &[f64], start: usize, end: usize) -> f64 {
@@ -208,6 +221,20 @@ fn univariate_segment_case_strategy(
     min_segment_len: usize,
 ) -> impl Strategy<Value = (Vec<f64>, usize, usize)> {
     prop::collection::vec(-1_000.0f64..1_000.0, 8..96).prop_flat_map(move |values| {
+        let n = values.len();
+        (0usize..=(n - min_segment_len)).prop_flat_map(move |start| {
+            let values_for_start = values.clone();
+            ((start + min_segment_len)..=n)
+                .prop_map(move |end| (values_for_start.clone(), start, end))
+        })
+    })
+}
+
+fn univariate_count_segment_case_strategy(
+    min_segment_len: usize,
+) -> impl Strategy<Value = (Vec<f64>, usize, usize)> {
+    prop::collection::vec(0u16..80u16, 8..96).prop_flat_map(move |counts| {
+        let values: Vec<f64> = counts.into_iter().map(f64::from).collect();
         let n = values.len();
         (0usize..=(n - min_segment_len)).prop_flat_map(move |start| {
             let values_for_start = values.clone();
@@ -351,6 +378,24 @@ proptest! {
         let actual_first = model.segment_cost(&cache, start, end);
         let actual_second = model.segment_cost(&cache, start, end);
         let expected = naive_nig_default_prior(&values, start, end);
+
+        prop_assert!(relative_close(actual_first, expected));
+        prop_assert!(relative_close(actual_first, actual_second));
+    }
+
+    #[test]
+    fn poisson_segment_cost_is_deterministic_and_matches_naive(
+        (values, start, end) in univariate_count_segment_case_strategy(1),
+    ) {
+        let view = make_univariate_view(&values);
+        let model = CostPoissonRate::new(ReproMode::Balanced);
+        let cache = model
+            .precompute(&view, &CachePolicy::Full)
+            .expect("precompute should succeed for valid generated data");
+
+        let actual_first = model.segment_cost(&cache, start, end);
+        let actual_second = model.segment_cost(&cache, start, end);
+        let expected = naive_poisson(&values, start, end);
 
         prop_assert!(relative_close(actual_first, expected));
         prop_assert!(relative_close(actual_first, actual_second));
