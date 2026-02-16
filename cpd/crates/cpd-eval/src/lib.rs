@@ -56,16 +56,20 @@ pub fn online_metrics(
     true_change_points: &[usize],
 ) -> Result<OnlineMetrics, CpdError> {
     validate_online_inputs(steps, true_change_points)?;
+    let observed_change_points = observed_change_points_within_horizon(steps, true_change_points);
 
-    let classification = classify_alerts(steps, true_change_points, |step| step.alert);
+    let classification =
+        classify_alerts(steps, observed_change_points.as_slice(), |step| step.alert);
     let mean_detection_delay = mean_usize(classification.detection_delays.as_slice());
     let false_alarm_rate = rate(classification.false_alerts, steps.len());
     let arl0 =
         mean_run_length_between_false_alerts(classification.false_alert_positions.as_slice());
-    let arl1 = mean_detection_delay.map(|delay| delay + 1.0);
+    // ARL1 uses the same origin as detection delay: steps from true change index
+    // to the first alert that detects the change.
+    let arl1 = mean_detection_delay;
     let roc_curve = roc_curve_data_with_validation(
         steps,
-        true_change_points,
+        observed_change_points.as_slice(),
         default_roc_thresholds(steps).as_slice(),
     )?;
 
@@ -84,13 +88,18 @@ pub fn online_metrics(
 
 /// Computes ROC curve points by sweeping explicit alert thresholds over
 /// `OnlineStepResult::p_change`.
+///
+/// `false_positive_rate` is computed as `false_positives / negatives`, where
+/// `negatives` is the number of observed steps that are not true change points
+/// in the evaluated horizon.
 pub fn roc_curve_data(
     steps: &[OnlineStepResult],
     true_change_points: &[usize],
     thresholds: &[f64],
 ) -> Result<Vec<RocPoint>, CpdError> {
     validate_online_inputs(steps, true_change_points)?;
-    roc_curve_data_with_validation(steps, true_change_points, thresholds)
+    let observed_change_points = observed_change_points_within_horizon(steps, true_change_points);
+    roc_curve_data_with_validation(steps, observed_change_points.as_slice(), thresholds)
 }
 
 /// Computes offline evaluation metrics from detected and true segmentation outputs.
@@ -373,6 +382,8 @@ fn roc_curve_data_with_validation(
         }
     }
 
+    let true_change_steps = count_true_change_steps(steps, true_change_points);
+    let negative_steps = steps.len().saturating_sub(true_change_steps);
     let mut points = Vec::with_capacity(thresholds.len());
     for &threshold in thresholds {
         let classification =
@@ -382,7 +393,7 @@ fn roc_curve_data_with_validation(
         } else {
             classification.detected_changes as f64 / true_change_points.len() as f64
         };
-        let false_positive_rate = rate(classification.false_alerts, steps.len());
+        let false_positive_rate = rate(classification.false_alerts, negative_steps);
 
         points.push(RocPoint {
             threshold,
@@ -394,6 +405,37 @@ fn roc_curve_data_with_validation(
     }
 
     Ok(points)
+}
+
+fn observed_change_points_within_horizon(
+    steps: &[OnlineStepResult],
+    true_change_points: &[usize],
+) -> Vec<usize> {
+    let Some(last_step) = steps.last() else {
+        return Vec::new();
+    };
+    true_change_points
+        .iter()
+        .copied()
+        .take_while(|&change_point| change_point <= last_step.t)
+        .collect()
+}
+
+fn count_true_change_steps(steps: &[OnlineStepResult], true_change_points: &[usize]) -> usize {
+    let mut change_idx = 0usize;
+    let mut count = 0usize;
+
+    for step in steps {
+        while change_idx < true_change_points.len() && true_change_points[change_idx] < step.t {
+            change_idx += 1;
+        }
+        if change_idx < true_change_points.len() && true_change_points[change_idx] == step.t {
+            count += 1;
+            change_idx += 1;
+        }
+    }
+
+    count
 }
 
 fn validate_online_inputs(
@@ -757,7 +799,7 @@ mod tests {
             metrics
                 .arl1
                 .expect("arl1 should be defined when changes are detected"),
-            2.0,
+            1.0,
         );
         assert_eq!(metrics.detected_changes, 2);
         assert_eq!(metrics.missed_changes, 0);
@@ -818,9 +860,27 @@ mod tests {
         assert_eq!(roc[1].false_alerts, 0);
 
         assert_approx_eq(roc[2].true_positive_rate, 1.0);
-        assert_approx_eq(roc[2].false_positive_rate, 0.2);
+        assert_approx_eq(roc[2].false_positive_rate, 0.25);
         assert_eq!(roc[2].detected_changes, 2);
         assert_eq!(roc[2].false_alerts, 2);
+    }
+
+    #[test]
+    fn online_metrics_ignore_truth_change_points_after_observed_horizon() {
+        let steps = vec![
+            step(0, 0.1, false),
+            step(1, 0.2, false),
+            step(2, 0.3, false),
+            step(3, 0.4, false),
+            step(4, 0.5, false),
+        ];
+
+        let metrics = online_metrics(&steps, &[2, 10]).expect("online metrics should compute");
+        assert_eq!(metrics.detected_changes, 0);
+        assert_eq!(metrics.missed_changes, 1);
+        assert_eq!(metrics.false_alerts, 0);
+        assert!(metrics.mean_detection_delay.is_none());
+        assert!(metrics.arl1.is_none());
     }
 
     #[test]
