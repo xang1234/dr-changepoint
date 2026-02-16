@@ -6,7 +6,8 @@ use crate::diagnostics::{
     DiagnosticsSummary, DoctorDiagnosticsConfig, MissingPattern, compute_diagnostics,
 };
 use cpd_core::{
-    Constraints, CpdError, DTypeView, MemoryLayout, TimeSeriesView, validate_constraints_config,
+    Constraints, CpdError, DTypeView, MemoryLayout, TimeSeriesView, validate_constraints,
+    validate_constraints_config,
 };
 use cpd_offline::{BinSegConfig, PeltConfig, WbsConfig, WbsIntervalStrategy};
 use cpd_online::{
@@ -194,6 +195,7 @@ pub fn recommend(
 
     let base_constraints = constraints.unwrap_or_default();
     validate_constraints_config(&base_constraints)?;
+    let _ = validate_constraints(&base_constraints, x.n)?;
 
     let diagnostics = compute_diagnostics(x, &DoctorDiagnosticsConfig::default())?;
     let data_hints = sample_data_hints(x, diagnostics.subsample_stride.max(1), BINARY_TOLERANCE)?;
@@ -521,7 +523,7 @@ fn strongest_active_signal(
         .max_by(|(signal_a, score_a), (signal_b, score_b)| {
             score_a
                 .total_cmp(score_b)
-                .then_with(|| signal_priority(*signal_b).cmp(&signal_priority(*signal_a)))
+                .then_with(|| signal_priority(*signal_a).cmp(&signal_priority(*signal_b)))
         })
         .map(|(signal, _)| signal)
 }
@@ -1144,65 +1146,35 @@ fn sample_data_hints(
     let mut binary = 0usize;
     let mut count = 0usize;
 
+    let stride = stride.max(1);
     let mut t = 0usize;
+    let mut sampled_last = false;
     while t < x.n {
-        for j in 0..x.d {
-            let idx = source_index(x.layout, x.n, x.d, t, j)?;
-            if idx >= source_len {
-                return Err(CpdError::invalid_input(format!(
-                    "source index out of bounds while sampling recommendation hints: idx={idx}, len={source_len}"
-                )));
-            }
-
-            let value = match x.values {
-                DTypeView::F32(values) => f64::from(values[idx]),
-                DTypeView::F64(values) => values[idx],
-            };
-            let mask_missing = x.missing_mask.map(|mask| mask[idx] == 1).unwrap_or(false);
-            if mask_missing || value.is_nan() {
-                continue;
-            }
-
-            valid = valid.saturating_add(1);
-
-            if (value - 0.0).abs() <= tolerance || (value - 1.0).abs() <= tolerance {
-                binary = binary.saturating_add(1);
-            }
-
-            let rounded = value.round();
-            if value >= 0.0 && (value - rounded).abs() <= tolerance {
-                count = count.saturating_add(1);
-            }
+        if t + 1 == x.n {
+            sampled_last = true;
         }
-
-        t = t.saturating_add(stride.max(1));
+        sample_row_hints(
+            x,
+            source_len,
+            t,
+            tolerance,
+            &mut valid,
+            &mut binary,
+            &mut count,
+        )?;
+        t = t.saturating_add(stride);
     }
 
-    if x.n > 0 {
-        let last_t = x.n - 1;
-        for j in 0..x.d {
-            let idx = source_index(x.layout, x.n, x.d, last_t, j)?;
-            if idx >= source_len {
-                continue;
-            }
-            let value = match x.values {
-                DTypeView::F32(values) => f64::from(values[idx]),
-                DTypeView::F64(values) => values[idx],
-            };
-            let mask_missing = x.missing_mask.map(|mask| mask[idx] == 1).unwrap_or(false);
-            if mask_missing || value.is_nan() {
-                continue;
-            }
-
-            valid = valid.saturating_add(1);
-            if (value - 0.0).abs() <= tolerance || (value - 1.0).abs() <= tolerance {
-                binary = binary.saturating_add(1);
-            }
-            let rounded = value.round();
-            if value >= 0.0 && (value - rounded).abs() <= tolerance {
-                count = count.saturating_add(1);
-            }
-        }
+    if x.n > 0 && !sampled_last {
+        sample_row_hints(
+            x,
+            source_len,
+            x.n - 1,
+            tolerance,
+            &mut valid,
+            &mut binary,
+            &mut count,
+        )?;
     }
 
     if valid == 0 {
@@ -1222,6 +1194,47 @@ fn sample_data_hints(
         binary_like: false,
         count_like: count_ratio >= FAMILY_THRESHOLD,
     })
+}
+
+fn sample_row_hints(
+    x: &TimeSeriesView<'_>,
+    source_len: usize,
+    t: usize,
+    tolerance: f64,
+    valid: &mut usize,
+    binary: &mut usize,
+    count: &mut usize,
+) -> Result<(), CpdError> {
+    for j in 0..x.d {
+        let idx = source_index(x.layout, x.n, x.d, t, j)?;
+        if idx >= source_len {
+            return Err(CpdError::invalid_input(format!(
+                "source index out of bounds while sampling recommendation hints: idx={idx}, len={source_len}"
+            )));
+        }
+
+        let value = match x.values {
+            DTypeView::F32(values) => f64::from(values[idx]),
+            DTypeView::F64(values) => values[idx],
+        };
+        let mask_missing = x.missing_mask.map(|mask| mask[idx] == 1).unwrap_or(false);
+        if mask_missing || value.is_nan() {
+            continue;
+        }
+
+        *valid = valid.saturating_add(1);
+
+        if (value - 0.0).abs() <= tolerance || (value - 1.0).abs() <= tolerance {
+            *binary = binary.saturating_add(1);
+        }
+
+        let rounded = value.round();
+        if value >= 0.0 && (value - rounded).abs() <= tolerance {
+            *count = count.saturating_add(1);
+        }
+    }
+
+    Ok(())
 }
 
 fn source_index(
@@ -1322,7 +1335,7 @@ mod tests {
         Objective, OfflineCostKind, OfflineDetectorConfig, OnlineDetectorConfig, PipelineConfig,
         recommend,
     };
-    use cpd_core::{MemoryLayout, MissingPolicy, TimeIndex, TimeSeriesView};
+    use cpd_core::{Constraints, MemoryLayout, MissingPolicy, TimeIndex, TimeSeriesView};
     use cpd_online::ObservationModel;
     use std::collections::BTreeSet;
 
@@ -1573,6 +1586,98 @@ mod tests {
         let err = recommend(&view, Objective::Balanced, false, None, 1.2, true)
             .expect_err("min_confidence should be validated");
         assert!(err.to_string().contains("min_confidence"));
+    }
+
+    #[test]
+    fn recommend_rejects_constraints_invalid_for_series_length() {
+        let values = vec![0.0; 64];
+        let view = make_univariate_view(&values);
+        let constraints = Constraints {
+            candidate_splits: Some(vec![70]),
+            ..Constraints::default()
+        };
+
+        let err = recommend(
+            &view,
+            Objective::Balanced,
+            false,
+            Some(constraints),
+            0.20,
+            true,
+        )
+        .expect_err("constraint validation should use x.n");
+        assert!(err.to_string().contains("candidate_splits"));
+    }
+
+    #[test]
+    fn strongest_active_signal_prefers_higher_priority_on_score_tie() {
+        let summary = super::DiagnosticsSummary {
+            valid_dimensions: 1,
+            nan_rate: 0.0,
+            longest_nan_run: 0,
+            missing_pattern: super::MissingPattern::None,
+            kurtosis_proxy: 4.0,
+            outlier_rate_iqr: 0.0,
+            mad_to_std_ratio: 1.0,
+            lag1_autocorr: 0.55,
+            lagk_autocorr: 0.0,
+            pacf_lagk_proxy: 0.0,
+            residual_lag1_autocorr: 0.0,
+            rolling_mean_drift: 0.0,
+            rolling_variance_drift: 0.0,
+            regime_change_proxy: 0.0,
+            change_density_score: 0.0,
+            dominant_period_hints: vec![],
+        };
+        let flags = super::SignalFlags {
+            huge_n: false,
+            medium_n: false,
+            autocorrelated: true,
+            heavy_tail: true,
+            change_dense: false,
+            few_strong_changes: false,
+            masking_risk: false,
+            low_signal: false,
+            conflicting_signals: false,
+        };
+
+        let strongest =
+            super::strongest_active_signal(&summary, flags, super::DataHints::default());
+        assert_eq!(strongest, Some(super::SignalKind::Autocorrelated));
+    }
+
+    #[test]
+    fn sample_data_hints_does_not_double_count_last_sample() {
+        let mut values = vec![2.0; 50];
+        values[49] = 2.5;
+        let view = make_univariate_view(&values);
+
+        let hints = super::sample_data_hints(&view, 1, super::BINARY_TOLERANCE)
+            .expect("hint sampling should succeed");
+        assert!(!hints.binary_like);
+        assert!(hints.count_like);
+    }
+
+    #[test]
+    fn sample_data_hints_reports_oob_for_tail_row_sampling() {
+        let values = (0..10).map(|i| i as f64).collect::<Vec<_>>();
+        let view = TimeSeriesView::from_f64(
+            &values,
+            5,
+            2,
+            MemoryLayout::Strided {
+                row_stride: 2,
+                col_stride: 2,
+            },
+            None,
+            TimeIndex::None,
+            MissingPolicy::Ignore,
+        )
+        .expect("strided view should construct");
+
+        let err = super::sample_data_hints(&view, 3, super::BINARY_TOLERANCE)
+            .expect_err("oob tail row should error");
+        assert!(err.to_string().contains("out of bounds"));
     }
 
     #[test]
