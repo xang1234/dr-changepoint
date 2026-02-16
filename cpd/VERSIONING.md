@@ -83,16 +83,13 @@ Parameter defaults and validation semantics:
 - This issue establishes the policy and CI fixtures; runtime migration shims for
   future schema bumps are tracked as follow-up implementation work.
 
-## Checkpoint Compatibility Policy (Provisional)
-
-Online checkpoint payloads are currently policy-level while online checkpoint
-serialization is under development.
+## Checkpoint Compatibility Policy
 
 Required envelope fields:
 
-- `schema_version`
 - `detector_id`
-- `engine_version`
+- `state_schema_version`
+- `engine_fingerprint`
 - `created_at_ns`
 - `payload_codec`
 - `payload_crc32`
@@ -100,10 +97,12 @@ Required envelope fields:
 
 Compatibility rules:
 
-- Apply the same N-1 read policy used for config/result payloads.
-- Checksum mismatch/corruption must fail fast with `CpdError`.
+- Runtime writers emit v1 canonical envelopes (`state_schema_version=1`).
+- Runtime readers accept v1 and legacy v0 (`schema_version=0`) envelopes
+  under the N-1 read compatibility policy.
+- Checksum mismatch/corruption must fail fast with `CpdError::InvalidInput`.
 - Unsupported checkpoint schema versions must fail explicitly with actionable
-  errors.
+  errors and migration guidance.
 
 ## Migration Process
 

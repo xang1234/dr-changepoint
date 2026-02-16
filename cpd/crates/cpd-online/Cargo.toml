@@ -17,7 +17,14 @@ path = "src/lib.rs"
 [features]
 default = []
 rayon = ["cpd-core/rayon", "cpd-costs/rayon"]
-serde = ["cpd-core/serde", "cpd-costs/serde", "dep:serde"]
+serde = [
+  "cpd-core/serde",
+  "cpd-costs/serde",
+  "dep:serde",
+  "dep:serde_json",
+  "dep:bincode",
+  "dep:crc32fast",
+]
 tracing = ["cpd-core/tracing", "cpd-costs/tracing"]
 simd = ["cpd-core/simd", "cpd-costs/simd"]
 kernel = ["cpd-core/kernel", "cpd-costs/kernel"]
@@ -31,3 +38,6 @@ repro-strict = ["cpd-core/repro-strict", "cpd-costs/repro-strict"]
 cpd-core = { version = "0.1.0", path = "../cpd-core" }
 cpd-costs = { version = "0.1.0", path = "../cpd-costs" }
 serde = { version = "1", features = ["derive"], optional = true }
+serde_json = { version = "1", optional = true }
+bincode = { version = "1", optional = true }
+crc32fast = { version = "1", optional = true }

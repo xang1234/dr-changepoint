@@ -8,6 +8,15 @@ use crate::event_time::{
 use cpd_core::{CpdError, ExecutionContext, OnlineDetector, OnlineStepResult};
 use std::time::Instant;
 
+/// Stable detector identifier used in checkpoint envelopes.
+pub const CUSUM_DETECTOR_ID: &str = "cusum";
+/// CUSUM checkpoint state schema version.
+pub const CUSUM_STATE_SCHEMA_VERSION: u32 = 1;
+/// Stable detector identifier used in checkpoint envelopes.
+pub const PAGE_HINKLEY_DETECTOR_ID: &str = "page_hinkley";
+/// Page-Hinkley checkpoint state schema version.
+pub const PAGE_HINKLEY_STATE_SCHEMA_VERSION: u32 = 1;
+
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Clone, Debug, PartialEq)]
 struct PendingEvent {
@@ -143,7 +152,7 @@ impl CusumState {
         }
     }
 
-    fn validate(&self) -> Result<(), CpdError> {
+    pub(crate) fn validate(&self) -> Result<(), CpdError> {
         if !self.score.is_finite() || self.score < 0.0 {
             return Err(CpdError::invalid_input(format!(
                 "CUSUM state.score must be finite and >= 0; got {}",
@@ -623,7 +632,7 @@ impl PageHinkleyState {
         }
     }
 
-    fn validate(&self) -> Result<(), CpdError> {
+    pub(crate) fn validate(&self) -> Result<(), CpdError> {
         if self.n != self.t {
             return Err(CpdError::invalid_input(format!(
                 "Page-Hinkley state.n={} must equal t={} for incremental updates",

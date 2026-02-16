@@ -1,0 +1,55 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cpd-rs.dev/schemas/checkpoint/online_detector_checkpoint.v1.schema.json",
+  "title": "OnlineDetectorCheckpoint v1",
+  "description": "Canonical checkpoint envelope for online detector state persistence.",
+  "type": "object",
+  "required": [
+    "detector_id",
+    "state_schema_version",
+    "engine_fingerprint",
+    "created_at_ns",
+    "payload_codec",
+    "payload_crc32",
+    "payload"
+  ],
+  "properties": {
+    "detector_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "state_schema_version": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "engine_fingerprint": {
+      "type": "string",
+      "minLength": 1
+    },
+    "created_at_ns": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "payload_codec": {
+      "type": "string",
+      "enum": [
+        "json",
+        "bincode"
+      ]
+    },
+    "payload_crc32": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 4294967295
+    },
+    "payload": {
+      "type": "array",
+      "items": {
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 255
+      }
+    }
+  },
+  "additionalProperties": true
+}

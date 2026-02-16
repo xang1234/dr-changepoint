@@ -1,0 +1,14 @@
+{
+  "schema_version": 0,
+  "detector_id": "cusum",
+  "engine_version": "0.1.0",
+  "created_at_ns": 1738886400000000000,
+  "payload_codec": "json",
+  "payload_crc32": "90ff1ec1",
+  "payload": {
+    "t": 3,
+    "watermark_ns": null,
+    "score": 0.2,
+    "steps_since_alert": 3
+  }
+}

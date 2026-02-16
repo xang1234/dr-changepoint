@@ -64,6 +64,7 @@ jobs:
         run: |
           cargo test -p cpd-core --features serde --lib schema_migration::tests::
           cargo test -p cpd-offline --features serde --lib schema_migration::tests::
+          cargo test -p cpd-online --features serde --lib checkpoint::tests::
 
   cpd-online-concurrency-smoke:
     name: cpd-online-concurrency-smoke

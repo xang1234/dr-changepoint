@@ -11,6 +11,11 @@ use cpd_core::{
 use std::f64::consts::PI;
 use std::time::Instant;
 
+/// Stable detector identifier used in checkpoint envelopes.
+pub const BOCPD_DETECTOR_ID: &str = "bocpd";
+/// BOCPD checkpoint state schema version.
+pub const BOCPD_STATE_SCHEMA_VERSION: u32 = 1;
+
 /// Hazard-function contract used by BOCPD run-length transitions.
 pub trait HazardFunction: Send + Sync {
     fn log_hazard(&self, r: usize) -> f64;
@@ -371,7 +376,7 @@ impl BocpdState {
         }
     }
 
-    fn validate(&self) -> Result<(), CpdError> {
+    pub(crate) fn validate(&self) -> Result<(), CpdError> {
         if self.log_run_probs.is_empty() {
             return Err(CpdError::invalid_input(
                 "bocpd state requires at least one run-length probability",
