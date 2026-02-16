@@ -3,9 +3,14 @@
 #![forbid(unsafe_code)]
 
 pub mod diagnostics;
+pub mod recommendation;
 pub use diagnostics::{
     DiagnosticsReport, DiagnosticsSummary, DimensionDiagnostics, DoctorDiagnosticsConfig,
     DominantPeriodHint, MissingPattern, compute_diagnostics,
+};
+pub use recommendation::{
+    Explanation, Objective, OfflineCostKind, OfflineDetectorConfig, OnlineDetectorConfig,
+    PipelineConfig, Recommendation, ResourceEstimate, ValidationSummary, recommend,
 };
 
 #[cfg(feature = "preprocess")]
