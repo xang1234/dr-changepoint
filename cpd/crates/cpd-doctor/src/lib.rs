@@ -9,10 +9,11 @@ pub use diagnostics::{
     DominantPeriodHint, MissingPattern, compute_diagnostics,
 };
 pub use recommendation::{
-    CalibrationFamily, CalibrationMetrics, CalibrationObservation, Explanation,
-    FamilyCalibrationMetrics, Objective, OfflineCostKind, OfflineDetectorConfig,
-    OnlineDetectorConfig, PipelineConfig, Recommendation, ResourceEstimate, ValidationReport,
-    ValidationSummary, confidence_formula, evaluate_calibration, recommend, validate_top_k,
+    CalibrationFamily, CalibrationMetrics, CalibrationObservation, CostConfig, DetectorConfig,
+    Explanation, FamilyCalibrationMetrics, Objective, OfflineCostKind, OfflineDetectorConfig,
+    OnlineDetectorConfig, OnlineDetectorKind, OnlineObservationKind, PipelineConfig, PipelineSpec,
+    Recommendation, ResourceEstimate, ValidationReport, ValidationSummary, confidence_formula,
+    evaluate_calibration, execute_pipeline, recommend, validate_top_k,
 };
 
 #[cfg(feature = "preprocess")]

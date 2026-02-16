@@ -59,6 +59,27 @@ def test_detect_offline_matches_class_api_for_pelt_and_binseg() -> None:
     assert binseg_low.breakpoints == binseg_class.breakpoints
 
 
+def test_detect_offline_accepts_pipeline_spec() -> None:
+    x = _three_regime_signal()
+    pipeline = {
+        "detector": {"kind": "pelt", "params_per_segment": 2},
+        "cost": "l2",
+        "constraints": {"min_segment_len": 2},
+        "stopping": {"n_bkps": 2},
+    }
+
+    pipelined = cpd.detect_offline(x, pipeline=pipeline)
+    explicit = cpd.detect_offline(
+        x,
+        detector="pelt",
+        cost="l2",
+        constraints={"min_segment_len": 2},
+        stopping={"n_bkps": 2},
+    )
+
+    assert pipelined.breakpoints == explicit.breakpoints
+
+
 def test_detect_offline_accepts_extended_constraints_surface() -> None:
     x = _three_regime_signal()
     result = cpd.detect_offline(
@@ -100,6 +121,13 @@ def test_detect_offline_rejects_invalid_parameters() -> None:
 
     with pytest.raises(ValueError, match="unsupported constraints key"):
         cpd.detect_offline(x, constraints={"not_a_real_key": 1}, stopping={"n_bkps": 2})
+
+    with pytest.raises(ValueError, match="either pipeline"):
+        cpd.detect_offline(
+            x,
+            pipeline={"detector": "pelt", "stopping": {"n_bkps": 2}},
+            detector="binseg",
+        )
 
 
 def test_detect_offline_rejects_preprocess_without_feature() -> None:

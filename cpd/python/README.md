@@ -216,7 +216,7 @@ to verify architecture and run the CI-aligned local sanity flow.
 - `Binseg(model="l2"|"normal", min_segment_len, jump, max_change_points, max_depth)`
   - `.fit(x)` -> detector
   - `.predict(pen=..., n_bkps=...)` -> `OfflineChangePointResult`
-- `detect_offline(x, detector, cost, constraints, stopping, preprocess, repro_mode, return_diagnostics)`
+- `detect_offline(x, pipeline=None, detector, cost, constraints, stopping, preprocess, repro_mode, return_diagnostics)`
 - `OfflineChangePointResult`
   - fields: `breakpoints`, `change_points`, `scores`, `segments`, `diagnostics`
   - helper: `to_json()` (`from_json(...)` is planned and not yet implemented)

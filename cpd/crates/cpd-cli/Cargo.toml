@@ -11,17 +11,19 @@ path = "src/lib.rs"
 
 [features]
 default = []
-rayon = ["cpd-offline/rayon"]
-serde = ["cpd-offline/serde"]
-tracing = ["cpd-offline/tracing"]
-simd = ["cpd-offline/simd"]
-kernel = ["cpd-offline/kernel"]
-kernel-approx = ["cpd-offline/kernel-approx"]
-blas = ["cpd-offline/blas"]
-gp = ["cpd-offline/gp"]
-preprocess = ["cpd-offline/preprocess"]
-repro-strict = ["cpd-offline/repro-strict"]
+rayon = ["cpd-doctor/rayon", "cpd-offline/rayon"]
+serde = ["cpd-doctor/serde", "cpd-offline/serde", "dep:serde_json"]
+tracing = ["cpd-doctor/tracing", "cpd-offline/tracing"]
+simd = ["cpd-doctor/simd", "cpd-offline/simd"]
+kernel = ["cpd-doctor/kernel", "cpd-offline/kernel"]
+kernel-approx = ["cpd-doctor/kernel-approx", "cpd-offline/kernel-approx"]
+blas = ["cpd-doctor/blas", "cpd-offline/blas"]
+gp = ["cpd-doctor/gp", "cpd-offline/gp"]
+preprocess = ["cpd-doctor/preprocess", "cpd-offline/preprocess"]
+repro-strict = ["cpd-doctor/repro-strict", "cpd-offline/repro-strict"]
 
 [dependencies]
 cpd-core = { path = "../cpd-core" }
+cpd-doctor = { path = "../cpd-doctor" }
 cpd-offline = { path = "../cpd-offline" }
+serde_json = { version = "1", optional = true }

@@ -218,6 +218,7 @@ class SmokeDetector:
 def detect_offline(
     values: Any,
     *,
+    pipeline: dict[str, Any] | None = None,
     detector: str = "pelt",
     cost: str = "l2",
     constraints: dict[str, Any] | None = None,

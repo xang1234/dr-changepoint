@@ -226,7 +226,7 @@ impl CalibrationAccumulator {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Recommendation {
-    pub pipeline: PipelineConfig,
+    pub pipeline: PipelineSpec,
     pub resource_estimate: ResourceEstimate,
     pub warnings: Vec<String>,
     pub explanation: Explanation,
@@ -235,6 +235,227 @@ pub struct Recommendation {
     pub confidence_interval: (f64, f64),
     pub abstain_reason: Option<String>,
     pub objective_fit: Vec<(String, f64)>,
+}
+
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[derive(Clone, Debug, PartialEq)]
+pub struct PipelineSpec {
+    pub detector: DetectorConfig,
+    pub cost: CostConfig,
+    #[cfg(feature = "preprocess")]
+    pub preprocess: Option<cpd_preprocess::PreprocessConfig>,
+    #[cfg(not(feature = "preprocess"))]
+    pub preprocess: Option<()>,
+    pub constraints: Constraints,
+    pub stopping: Option<Stopping>,
+    pub seed: Option<u64>,
+}
+
+impl PipelineSpec {
+    fn from_pipeline_config(pipeline: &PipelineConfig) -> Self {
+        match pipeline {
+            PipelineConfig::Offline {
+                detector,
+                cost,
+                constraints,
+            } => Self {
+                detector: DetectorConfig::Offline(detector.clone()),
+                cost: CostConfig::from(*cost),
+                preprocess: None,
+                constraints: constraints.clone(),
+                stopping: Some(extract_stopping(detector)),
+                seed: extract_seed(detector),
+            },
+            PipelineConfig::Online { detector } => Self {
+                detector: DetectorConfig::Online(online_kind_from_config(detector)),
+                cost: CostConfig::None,
+                preprocess: None,
+                constraints: Constraints::default(),
+                stopping: None,
+                seed: None,
+            },
+        }
+    }
+
+    fn to_pipeline_config(&self) -> Result<PipelineConfig, CpdError> {
+        match &self.detector {
+            DetectorConfig::Offline(detector) => {
+                let cost = match self.cost {
+                    CostConfig::L2 => OfflineCostKind::L2,
+                    CostConfig::Normal => OfflineCostKind::Normal,
+                    CostConfig::Nig => OfflineCostKind::Nig,
+                    CostConfig::None => {
+                        return Err(CpdError::invalid_input(
+                            "offline pipeline requires a concrete offline cost",
+                        ));
+                    }
+                };
+                let stopping = self.stopping.clone().ok_or_else(|| {
+                    CpdError::invalid_input("offline pipeline requires stopping configuration")
+                })?;
+
+                let detector = with_stopping_and_seed(detector, &stopping, self.seed)?;
+                Ok(PipelineConfig::Offline {
+                    detector,
+                    cost,
+                    constraints: self.constraints.clone(),
+                })
+            }
+            DetectorConfig::Online(detector) => {
+                if !matches!(self.cost, CostConfig::None) {
+                    return Err(CpdError::invalid_input(
+                        "online pipeline must use CostConfig::None",
+                    ));
+                }
+                if self.stopping.is_some() {
+                    return Err(CpdError::invalid_input(
+                        "online pipeline must not include stopping configuration",
+                    ));
+                }
+                Ok(PipelineConfig::Online {
+                    detector: online_config_from_kind(detector),
+                })
+            }
+        }
+    }
+
+    fn is_online(&self) -> bool {
+        matches!(self.detector, DetectorConfig::Online(_))
+    }
+}
+
+fn extract_stopping(detector: &OfflineDetectorConfig) -> Stopping {
+    match detector {
+        OfflineDetectorConfig::Pelt(config) => config.stopping.clone(),
+        OfflineDetectorConfig::BinSeg(config) => config.stopping.clone(),
+        OfflineDetectorConfig::Wbs(config) => config.stopping.clone(),
+    }
+}
+
+fn extract_seed(detector: &OfflineDetectorConfig) -> Option<u64> {
+    match detector {
+        OfflineDetectorConfig::Wbs(config) => Some(config.seed),
+        OfflineDetectorConfig::Pelt(_) | OfflineDetectorConfig::BinSeg(_) => None,
+    }
+}
+
+fn with_stopping_and_seed(
+    detector: &OfflineDetectorConfig,
+    stopping: &Stopping,
+    seed: Option<u64>,
+) -> Result<OfflineDetectorConfig, CpdError> {
+    let seeded = match detector {
+        OfflineDetectorConfig::Pelt(config) => {
+            let mut updated = config.clone();
+            updated.stopping = stopping.clone();
+            OfflineDetectorConfig::Pelt(updated)
+        }
+        OfflineDetectorConfig::BinSeg(config) => {
+            let mut updated = config.clone();
+            updated.stopping = stopping.clone();
+            OfflineDetectorConfig::BinSeg(updated)
+        }
+        OfflineDetectorConfig::Wbs(config) => {
+            let mut updated = config.clone();
+            updated.stopping = stopping.clone();
+            if let Some(seed_value) = seed {
+                updated.seed = seed_value;
+            }
+            OfflineDetectorConfig::Wbs(updated)
+        }
+    };
+    Ok(seeded)
+}
+
+fn online_kind_from_config(detector: &OnlineDetectorConfig) -> OnlineDetectorKind {
+    match detector {
+        OnlineDetectorConfig::Bocpd(config) => {
+            let observation = match &config.observation {
+                ObservationModel::Gaussian { .. } => OnlineObservationKind::GaussianNig,
+                ObservationModel::Bernoulli { .. } => OnlineObservationKind::Bernoulli,
+                ObservationModel::Poisson { .. } => OnlineObservationKind::Poisson,
+            };
+            OnlineDetectorKind::Bocpd {
+                observation,
+                max_run_length: config.max_run_length,
+            }
+        }
+        OnlineDetectorConfig::Cusum(_) => OnlineDetectorKind::Cusum,
+        OnlineDetectorConfig::PageHinkley(_) => OnlineDetectorKind::PageHinkley,
+    }
+}
+
+fn online_config_from_kind(detector: &OnlineDetectorKind) -> OnlineDetectorConfig {
+    match detector {
+        OnlineDetectorKind::Bocpd {
+            observation,
+            max_run_length,
+        } => {
+            let mut config = BocpdConfig::default();
+            config.max_run_length = *max_run_length;
+            config.observation = match observation {
+                OnlineObservationKind::GaussianNig => ObservationModel::Gaussian {
+                    prior: GaussianNigPrior::default(),
+                },
+                OnlineObservationKind::Bernoulli => ObservationModel::Bernoulli {
+                    prior: BernoulliBetaPrior::default(),
+                },
+                OnlineObservationKind::Poisson => ObservationModel::Poisson {
+                    prior: PoissonGammaPrior::default(),
+                },
+            };
+            OnlineDetectorConfig::Bocpd(config)
+        }
+        OnlineDetectorKind::Cusum => OnlineDetectorConfig::Cusum(CusumConfig::default()),
+        OnlineDetectorKind::PageHinkley => {
+            OnlineDetectorConfig::PageHinkley(PageHinkleyConfig::default())
+        }
+    }
+}
+
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[derive(Clone, Debug, PartialEq)]
+pub enum DetectorConfig {
+    Offline(OfflineDetectorConfig),
+    Online(OnlineDetectorKind),
+}
+
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OnlineObservationKind {
+    GaussianNig,
+    Bernoulli,
+    Poisson,
+}
+
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum OnlineDetectorKind {
+    Bocpd {
+        observation: OnlineObservationKind,
+        max_run_length: usize,
+    },
+    Cusum,
+    PageHinkley,
+}
+
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CostConfig {
+    L2,
+    Normal,
+    Nig,
+    None,
+}
+
+impl From<OfflineCostKind> for CostConfig {
+    fn from(value: OfflineCostKind) -> Self {
+        match value {
+            OfflineCostKind::L2 => Self::L2,
+            OfflineCostKind::Normal => Self::Normal,
+            OfflineCostKind::Nig => Self::Nig,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -249,6 +470,7 @@ pub enum PipelineConfig {
     },
 }
 
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Clone, Debug, PartialEq)]
 pub enum OfflineDetectorConfig {
     Pelt(PeltConfig),
@@ -256,6 +478,7 @@ pub enum OfflineDetectorConfig {
     Wbs(WbsConfig),
 }
 
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OfflineCostKind {
     L2,
@@ -293,7 +516,7 @@ pub struct ValidationSummary {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct ValidationReport {
-    pub pipeline_results: Vec<(PipelineConfig, OfflineChangePointResult)>,
+    pub pipeline_results: Vec<(PipelineSpec, OfflineChangePointResult)>,
     pub stability_score: f64,
     pub agreement_score: f64,
     pub calibration_score: Option<f64>,
@@ -541,6 +764,14 @@ pub fn recommend(
     Ok(recommendations)
 }
 
+/// Executes an offline pipeline specification directly from Rust.
+pub fn execute_pipeline(
+    x: &TimeSeriesView<'_>,
+    pipeline: &PipelineSpec,
+) -> Result<OfflineChangePointResult, CpdError> {
+    run_offline_pipeline(x, pipeline)
+}
+
 pub fn validate_top_k(
     x: &TimeSeriesView<'_>,
     recommendations: &[Recommendation],
@@ -632,9 +863,9 @@ pub fn validate_top_k(
         );
     }
 
-    let mut pipeline_results = Vec::<(PipelineConfig, OfflineChangePointResult)>::new();
+    let mut pipeline_results = Vec::<(PipelineSpec, OfflineChangePointResult)>::new();
     for (rank, recommendation) in recommendations.iter().take(selected_len).enumerate() {
-        if matches!(recommendation.pipeline, PipelineConfig::Online { .. }) {
+        if recommendation.pipeline.is_online() {
             notes.push(format!(
                 "skipped recommendation rank {} because online pipelines do not produce OfflineChangePointResult",
                 rank + 1
@@ -652,7 +883,7 @@ pub fn validate_top_k(
                 notes.push(format!(
                     "validation run failed for recommendation rank {} (pipeline={}): {err}",
                     rank + 1,
-                    pipeline_id(&effective_pipeline)
+                    pipeline_id_spec(&effective_pipeline)
                 ));
             }
         }
@@ -887,6 +1118,21 @@ fn remap_breakpoints_to_original(
 
 fn run_offline_pipeline(
     x: &TimeSeriesView<'_>,
+    pipeline: &PipelineSpec,
+) -> Result<OfflineChangePointResult, CpdError> {
+    let config = pipeline.to_pipeline_config()?;
+    #[cfg(feature = "preprocess")]
+    if let Some(preprocess) = pipeline.preprocess.as_ref() {
+        let preprocess = cpd_preprocess::PreprocessPipeline::new(preprocess.clone())?;
+        let preprocessed = preprocess.apply(x)?;
+        let preprocessed_view = preprocessed.as_view()?;
+        return run_offline_pipeline_with_config(&preprocessed_view, &config);
+    }
+    run_offline_pipeline_with_config(x, &config)
+}
+
+fn run_offline_pipeline_with_config(
+    x: &TimeSeriesView<'_>,
     pipeline: &PipelineConfig,
 ) -> Result<OfflineChangePointResult, CpdError> {
     let PipelineConfig::Offline {
@@ -951,36 +1197,22 @@ fn run_offline_detector_with_cost<C: CostModel>(
     }
 }
 
-fn pipeline_with_seed_override(pipeline: &PipelineConfig, seed: Option<u64>) -> PipelineConfig {
+fn pipeline_with_seed_override(pipeline: &PipelineSpec, seed: Option<u64>) -> PipelineSpec {
     let Some(seed_value) = seed else {
         return pipeline.clone();
     };
-
-    match pipeline {
-        PipelineConfig::Offline {
-            detector: OfflineDetectorConfig::Wbs(config),
-            cost,
-            constraints,
-        } => {
-            let mut seeded = config.clone();
-            seeded.seed = seed_value;
-            PipelineConfig::Offline {
-                detector: OfflineDetectorConfig::Wbs(seeded),
-                cost: *cost,
-                constraints: constraints.clone(),
-            }
-        }
-        _ => pipeline.clone(),
-    }
+    let mut updated = pipeline.clone();
+    updated.seed = Some(seed_value);
+    updated
 }
 
 fn pipeline_with_scaled_penalty(
-    pipeline: &PipelineConfig,
+    pipeline: &PipelineSpec,
     scale: f64,
     n: usize,
     d: usize,
     seed: Option<u64>,
-) -> Result<Option<PipelineConfig>, CpdError> {
+) -> Result<Option<PipelineSpec>, CpdError> {
     if !scale.is_finite() || scale <= 0.0 {
         return Err(CpdError::invalid_input(format!(
             "penalty scale must be finite and > 0; got {scale}"
@@ -991,7 +1223,7 @@ fn pipeline_with_scaled_penalty(
         detector,
         cost,
         constraints,
-    } = pipeline
+    } = pipeline.to_pipeline_config()?
     else {
         return Ok(None);
     };
@@ -1005,11 +1237,13 @@ fn pipeline_with_scaled_penalty(
             };
             let mut scaled = config.clone();
             scaled.stopping = stopping;
-            Ok(Some(PipelineConfig::Offline {
-                detector: OfflineDetectorConfig::Pelt(scaled),
-                cost: *cost,
-                constraints: constraints.clone(),
-            }))
+            Ok(Some(PipelineSpec::from_pipeline_config(
+                &PipelineConfig::Offline {
+                    detector: OfflineDetectorConfig::Pelt(scaled),
+                    cost,
+                    constraints: constraints.clone(),
+                },
+            )))
         }
         OfflineDetectorConfig::BinSeg(config) => {
             let Some(stopping) =
@@ -1019,11 +1253,13 @@ fn pipeline_with_scaled_penalty(
             };
             let mut scaled = config.clone();
             scaled.stopping = stopping;
-            Ok(Some(PipelineConfig::Offline {
-                detector: OfflineDetectorConfig::BinSeg(scaled),
-                cost: *cost,
-                constraints: constraints.clone(),
-            }))
+            Ok(Some(PipelineSpec::from_pipeline_config(
+                &PipelineConfig::Offline {
+                    detector: OfflineDetectorConfig::BinSeg(scaled),
+                    cost,
+                    constraints: constraints.clone(),
+                },
+            )))
         }
         OfflineDetectorConfig::Wbs(config) => {
             let Some(stopping) =
@@ -1036,11 +1272,13 @@ fn pipeline_with_scaled_penalty(
             if let Some(seed_value) = seed {
                 scaled.seed = seed_value;
             }
-            Ok(Some(PipelineConfig::Offline {
-                detector: OfflineDetectorConfig::Wbs(scaled),
-                cost: *cost,
-                constraints: constraints.clone(),
-            }))
+            Ok(Some(PipelineSpec::from_pipeline_config(
+                &PipelineConfig::Offline {
+                    detector: OfflineDetectorConfig::Wbs(scaled),
+                    cost,
+                    constraints: constraints.clone(),
+                },
+            )))
         }
     }
 }
@@ -1202,7 +1440,7 @@ fn count_tolerance_matches(left: &[usize], right: &[usize], tolerance: usize) ->
 
 fn compute_penalty_sensitivity(
     validation_view: &TimeSeriesView<'_>,
-    pipeline_results: &[(PipelineConfig, OfflineChangePointResult)],
+    pipeline_results: &[(PipelineSpec, OfflineChangePointResult)],
     tolerance: usize,
     seed: Option<u64>,
     sampled_row_indices: Option<&[usize]>,
@@ -1242,7 +1480,7 @@ fn compute_penalty_sensitivity(
                 penalty_run_failure_count = penalty_run_failure_count.saturating_add(1);
                 notes.push(format!(
                     "penalty sensitivity skipped for pipeline={} because 0.9x run failed: {err}",
-                    pipeline_id(pipeline)
+                    pipeline_id_spec(pipeline)
                 ));
                 continue;
             }
@@ -1254,7 +1492,7 @@ fn compute_penalty_sensitivity(
                 penalty_run_failure_count = penalty_run_failure_count.saturating_add(1);
                 notes.push(format!(
                     "penalty sensitivity skipped for pipeline={} because 1.1x run failed: {err}",
-                    pipeline_id(pipeline)
+                    pipeline_id_spec(pipeline)
                 ));
                 continue;
             }
@@ -1347,7 +1585,7 @@ fn score_candidate(
         final_score,
         confidence: confidence_assessment,
         recommendation: Recommendation {
-            pipeline: candidate.pipeline.clone(),
+            pipeline: PipelineSpec::from_pipeline_config(&candidate.pipeline),
             resource_estimate: resource_estimate(&candidate.pipeline),
             warnings,
             explanation,
@@ -2915,12 +3153,19 @@ fn pipeline_id(pipeline: &PipelineConfig) -> String {
     }
 }
 
+fn pipeline_id_spec(pipeline: &PipelineSpec) -> String {
+    match pipeline.to_pipeline_config() {
+        Ok(config) => pipeline_id(&config),
+        Err(_) => "invalid_pipeline_spec".to_string(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        CalibrationFamily, CalibrationObservation, Objective, OfflineCostKind,
-        OfflineDetectorConfig, OnlineDetectorConfig, PipelineConfig, confidence_formula,
-        evaluate_calibration, recommend, validate_top_k,
+        CalibrationFamily, CalibrationObservation, CostConfig, DetectorConfig, Objective,
+        OfflineCostKind, OfflineDetectorConfig, OnlineDetectorConfig, PipelineConfig, PipelineSpec,
+        confidence_formula, evaluate_calibration, recommend, validate_top_k,
     };
     use cpd_core::{
         Constraints, MemoryLayout, MissingPolicy, Penalty, Stopping, TimeIndex, TimeSeriesView,
@@ -2956,7 +3201,7 @@ mod tests {
 
     fn make_recommendation(pipeline: PipelineConfig) -> super::Recommendation {
         super::Recommendation {
-            pipeline,
+            pipeline: PipelineSpec::from_pipeline_config(&pipeline),
             resource_estimate: super::ResourceEstimate {
                 time_complexity: "test".to_string(),
                 memory_complexity: "test".to_string(),
@@ -3019,7 +3264,11 @@ mod tests {
             recommend(&view, Objective::Speed, false, None, 0.20, true).expect("recommend");
 
         assert!(!recommendations.is_empty());
-        match &recommendations[0].pipeline {
+        let pipeline = recommendations[0]
+            .pipeline
+            .to_pipeline_config()
+            .expect("pipeline should convert");
+        match &pipeline {
             PipelineConfig::Offline {
                 detector: OfflineDetectorConfig::Pelt(_),
                 cost: OfflineCostKind::L2,
@@ -3049,7 +3298,11 @@ mod tests {
             recommend(&view, Objective::Robustness, false, None, 0.20, true).expect("recommend");
 
         assert!(!recommendations.is_empty());
-        match &recommendations[0].pipeline {
+        let pipeline = recommendations[0]
+            .pipeline
+            .to_pipeline_config()
+            .expect("pipeline should convert");
+        match &pipeline {
             PipelineConfig::Offline {
                 detector: OfflineDetectorConfig::Pelt(_),
                 cost: OfflineCostKind::Nig,
@@ -3071,7 +3324,11 @@ mod tests {
             recommend(&view, Objective::Accuracy, false, None, 0.20, true).expect("recommend");
 
         assert!(!recommendations.is_empty());
-        match &recommendations[0].pipeline {
+        let pipeline = recommendations[0]
+            .pipeline
+            .to_pipeline_config()
+            .expect("pipeline should convert");
+        match &pipeline {
             PipelineConfig::Offline {
                 detector: OfflineDetectorConfig::Pelt(_),
                 cost: OfflineCostKind::Normal,
@@ -3106,7 +3363,11 @@ mod tests {
             recommend(&view, Objective::Accuracy, false, None, 0.20, true).expect("recommend");
 
         assert!(!recommendations.is_empty());
-        match &recommendations[0].pipeline {
+        let pipeline = recommendations[0]
+            .pipeline
+            .to_pipeline_config()
+            .expect("pipeline should convert");
+        match &pipeline {
             PipelineConfig::Offline {
                 detector: OfflineDetectorConfig::Wbs(_),
                 cost: OfflineCostKind::Normal,
@@ -3126,7 +3387,11 @@ mod tests {
         let recommendations =
             recommend(&view, Objective::Balanced, true, None, 0.20, true).expect("recommend");
 
-        match &recommendations[0].pipeline {
+        let pipeline = recommendations[0]
+            .pipeline
+            .to_pipeline_config()
+            .expect("pipeline should convert");
+        match &pipeline {
             PipelineConfig::Online {
                 detector: OnlineDetectorConfig::Bocpd(cfg),
             } => {
@@ -3153,7 +3418,11 @@ mod tests {
         let recommendations =
             recommend(&view, Objective::Balanced, true, None, 0.20, true).expect("recommend");
 
-        match &recommendations[0].pipeline {
+        let pipeline = recommendations[0]
+            .pipeline
+            .to_pipeline_config()
+            .expect("pipeline should convert");
+        match &pipeline {
             PipelineConfig::Online {
                 detector: OnlineDetectorConfig::Bocpd(cfg),
             } => {
@@ -3237,7 +3506,11 @@ mod tests {
 
         assert_eq!(recommendations.len(), 1);
         assert!(recommendations[0].abstain_reason.is_some());
-        match &recommendations[0].pipeline {
+        let pipeline = recommendations[0]
+            .pipeline
+            .to_pipeline_config()
+            .expect("pipeline should convert");
+        match &pipeline {
             PipelineConfig::Offline {
                 detector: OfflineDetectorConfig::Pelt(_),
                 cost: OfflineCostKind::L2,
@@ -3681,7 +3954,7 @@ mod tests {
             recommend(&large_noise_view, Objective::Speed, false, None, 0.20, true)
                 .expect("large noise recommendation")
         {
-            path_ids.insert(super::pipeline_id(&recommendation.pipeline));
+            path_ids.insert(super::pipeline_id_spec(&recommendation.pipeline));
         }
 
         let mut ar = vec![0.0; 120_000];
@@ -3692,7 +3965,7 @@ mod tests {
         for recommendation in recommend(&ar_view, Objective::Accuracy, false, None, 0.20, true)
             .expect("ar recommendation")
         {
-            path_ids.insert(super::pipeline_id(&recommendation.pipeline));
+            path_ids.insert(super::pipeline_id_spec(&recommendation.pipeline));
         }
 
         let mut heavy = Vec::with_capacity(120_000);
@@ -3707,7 +3980,7 @@ mod tests {
         for recommendation in recommend(&heavy_view, Objective::Robustness, false, None, 0.20, true)
             .expect("heavy recommendation")
         {
-            path_ids.insert(super::pipeline_id(&recommendation.pipeline));
+            path_ids.insert(super::pipeline_id_spec(&recommendation.pipeline));
         }
 
         let mut masked_values = vec![0.0; 2_000];
@@ -3722,7 +3995,7 @@ mod tests {
         for recommendation in recommend(&masked_view, Objective::Accuracy, false, None, 0.20, true)
             .expect("masked recommendation")
         {
-            path_ids.insert(super::pipeline_id(&recommendation.pipeline));
+            path_ids.insert(super::pipeline_id_spec(&recommendation.pipeline));
         }
 
         let binary = (0..1024)
@@ -3732,7 +4005,7 @@ mod tests {
         for recommendation in recommend(&binary_view, Objective::Speed, true, None, 0.20, true)
             .expect("binary recommendation")
         {
-            path_ids.insert(super::pipeline_id(&recommendation.pipeline));
+            path_ids.insert(super::pipeline_id_spec(&recommendation.pipeline));
         }
 
         assert!(
@@ -3797,6 +4070,36 @@ mod tests {
         let err = evaluate_calibration(&observations, Some(10))
             .expect_err("invalid confidence should fail");
         assert!(err.to_string().contains("predicted_confidence"));
+    }
+
+    #[cfg(feature = "serde")]
+    #[test]
+    fn pipeline_spec_roundtrip_serde_executes_consistently() {
+        let values = vec![0.0, 0.0, 0.0, 5.0, 5.0, 5.0, -3.0, -3.0, -3.0];
+        let view = make_univariate_view(&values);
+        let pipeline = PipelineSpec {
+            detector: DetectorConfig::Offline(OfflineDetectorConfig::Pelt(
+                cpd_offline::PeltConfig::default(),
+            )),
+            cost: CostConfig::L2,
+            preprocess: None,
+            constraints: Constraints {
+                min_segment_len: 2,
+                ..Constraints::default()
+            },
+            stopping: Some(Stopping::KnownK(2)),
+            seed: None,
+        };
+
+        let first = super::execute_pipeline(&view, &pipeline).expect("first run should succeed");
+        let encoded = serde_json::to_vec(&pipeline).expect("pipeline should serialize");
+        let decoded: PipelineSpec =
+            serde_json::from_slice(&encoded).expect("pipeline should decode");
+        let second = super::execute_pipeline(&view, &decoded).expect("second run should succeed");
+
+        assert_eq!(first.breakpoints, second.breakpoints);
+        assert_eq!(first.diagnostics.algorithm, second.diagnostics.algorithm);
+        assert_eq!(first.diagnostics.cost_model, second.diagnostics.cost_model);
     }
 
     #[test]

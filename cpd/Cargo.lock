@@ -144,7 +144,9 @@ name = "cpd-cli"
 version = "0.1.0"
 dependencies = [
  "cpd-core",
+ "cpd-doctor",
  "cpd-offline",
+ "serde_json",
 ]
 
 [[package]]
@@ -173,6 +175,8 @@ dependencies = [
  "cpd-offline",
  "cpd-online",
  "cpd-preprocess",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

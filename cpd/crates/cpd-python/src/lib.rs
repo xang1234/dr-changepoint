@@ -17,7 +17,15 @@ use cpd_core::{
     Penalty, ReproMode, Stopping, TimeSeriesView,
 };
 use cpd_costs::{CostL2Mean, CostNormalMeanVar};
-use cpd_offline::{BinSeg as OfflineBinSeg, BinSegConfig, Pelt as OfflinePelt, PeltConfig};
+use cpd_doctor::{
+    CostConfig as DoctorCostConfig, DetectorConfig as DoctorDetectorConfig,
+    OfflineDetectorConfig as DoctorOfflineDetectorConfig, PipelineSpec as DoctorPipelineSpec,
+    execute_pipeline as execute_doctor_pipeline,
+};
+use cpd_offline::{
+    BinSeg as OfflineBinSeg, BinSegConfig, Pelt as OfflinePelt, PeltConfig, WbsConfig,
+    WbsIntervalStrategy,
+};
 use cpd_online::{
     AlertPolicy, BocpdConfig, BocpdDetector, BocpdState, ConstantHazard, CusumConfig,
     CusumDetector, CusumState, GeometricHazard, HazardSpec, LateDataPolicy, ObservationModel,
@@ -922,6 +930,196 @@ fn parse_preprocess(preprocess: Option<&Bound<'_, PyAny>>) -> PyResult<()> {
         ));
     }
     Ok(())
+}
+
+fn parse_pipeline_interval_strategy(raw: &str) -> PyResult<WbsIntervalStrategy> {
+    match raw.to_ascii_lowercase().as_str() {
+        "random" => Ok(WbsIntervalStrategy::Random),
+        "deterministic_grid" => Ok(WbsIntervalStrategy::DeterministicGrid),
+        "stratified" => Ok(WbsIntervalStrategy::Stratified),
+        _ => Err(PyValueError::new_err(format!(
+            "unsupported pipeline.detector.interval_strategy '{raw}'; expected one of: 'random', 'deterministic_grid', 'stratified'"
+        ))),
+    }
+}
+
+fn parse_pipeline_detector(value: &Bound<'_, PyAny>) -> PyResult<DoctorOfflineDetectorConfig> {
+    if let Ok(kind) = value.extract::<String>() {
+        return match kind.to_ascii_lowercase().as_str() {
+            "pelt" => Ok(DoctorOfflineDetectorConfig::Pelt(PeltConfig::default())),
+            "binseg" => Ok(DoctorOfflineDetectorConfig::BinSeg(BinSegConfig::default())),
+            "wbs" => Ok(DoctorOfflineDetectorConfig::Wbs(WbsConfig::default())),
+            _ => Err(PyValueError::new_err(format!(
+                "unsupported pipeline.detector '{kind}'; expected one of: 'pelt', 'binseg', 'wbs'"
+            ))),
+        };
+    }
+
+    let dict = value
+        .downcast::<PyDict>()
+        .map_err(|_| PyTypeError::new_err("pipeline.detector must be a string or dict"))?;
+    let kind_value = required_dict_key(dict, "kind", "pipeline.detector")?;
+    let kind: String = kind_value
+        .extract()
+        .map_err(|_| PyTypeError::new_err("pipeline.detector.kind must be a string"))?;
+
+    match kind.to_ascii_lowercase().as_str() {
+        "pelt" => {
+            let mut config = PeltConfig::default();
+            for (key_obj, value_obj) in dict.iter() {
+                let key: String = key_obj
+                    .extract()
+                    .map_err(|_| PyTypeError::new_err("pipeline.detector keys must be strings"))?;
+                match key.as_str() {
+                    "kind" => {}
+                    "params_per_segment" => {
+                        config.params_per_segment = value_obj.extract::<usize>()?
+                    }
+                    "cancel_check_every" => {
+                        config.cancel_check_every = value_obj.extract::<usize>()?
+                    }
+                    _ => {
+                        return Err(PyValueError::new_err(format!(
+                            "unsupported pipeline.detector key '{key}' for kind='pelt'"
+                        )));
+                    }
+                }
+            }
+            Ok(DoctorOfflineDetectorConfig::Pelt(config))
+        }
+        "binseg" => {
+            let mut config = BinSegConfig::default();
+            for (key_obj, value_obj) in dict.iter() {
+                let key: String = key_obj
+                    .extract()
+                    .map_err(|_| PyTypeError::new_err("pipeline.detector keys must be strings"))?;
+                match key.as_str() {
+                    "kind" => {}
+                    "params_per_segment" => {
+                        config.params_per_segment = value_obj.extract::<usize>()?
+                    }
+                    "cancel_check_every" => {
+                        config.cancel_check_every = value_obj.extract::<usize>()?
+                    }
+                    _ => {
+                        return Err(PyValueError::new_err(format!(
+                            "unsupported pipeline.detector key '{key}' for kind='binseg'"
+                        )));
+                    }
+                }
+            }
+            Ok(DoctorOfflineDetectorConfig::BinSeg(config))
+        }
+        "wbs" => {
+            let mut config = WbsConfig::default();
+            for (key_obj, value_obj) in dict.iter() {
+                let key: String = key_obj
+                    .extract()
+                    .map_err(|_| PyTypeError::new_err("pipeline.detector keys must be strings"))?;
+                match key.as_str() {
+                    "kind" => {}
+                    "params_per_segment" => {
+                        config.params_per_segment = value_obj.extract::<usize>()?
+                    }
+                    "cancel_check_every" => {
+                        config.cancel_check_every = value_obj.extract::<usize>()?
+                    }
+                    "num_intervals" => {
+                        config.num_intervals = value_obj.extract::<Option<usize>>()?
+                    }
+                    "interval_strategy" => {
+                        let raw = value_obj.extract::<String>().map_err(|_| {
+                            PyTypeError::new_err(
+                                "pipeline.detector.interval_strategy must be a string",
+                            )
+                        })?;
+                        config.interval_strategy = parse_pipeline_interval_strategy(&raw)?;
+                    }
+                    "seed" => config.seed = value_obj.extract::<u64>()?,
+                    _ => {
+                        return Err(PyValueError::new_err(format!(
+                            "unsupported pipeline.detector key '{key}' for kind='wbs'"
+                        )));
+                    }
+                }
+            }
+            Ok(DoctorOfflineDetectorConfig::Wbs(config))
+        }
+        _ => Err(PyValueError::new_err(format!(
+            "unsupported pipeline.detector.kind '{kind}'; expected one of: 'pelt', 'binseg', 'wbs'"
+        ))),
+    }
+}
+
+fn parse_pipeline_cost(value: &Bound<'_, PyAny>) -> PyResult<DoctorCostConfig> {
+    let raw = value
+        .extract::<String>()
+        .map_err(|_| PyTypeError::new_err("pipeline.cost must be a string"))?;
+    match raw.to_ascii_lowercase().as_str() {
+        "l2" => Ok(DoctorCostConfig::L2),
+        "normal" => Ok(DoctorCostConfig::Normal),
+        "nig" => Ok(DoctorCostConfig::Nig),
+        _ => Err(PyValueError::new_err(format!(
+            "unsupported pipeline.cost '{raw}'; expected one of: 'l2', 'normal', 'nig'"
+        ))),
+    }
+}
+
+fn parse_pipeline_spec(pipeline: &Bound<'_, PyAny>) -> PyResult<DoctorPipelineSpec> {
+    let dict = pipeline
+        .downcast::<PyDict>()
+        .map_err(|_| PyTypeError::new_err("pipeline must be a dict"))?;
+    reject_unknown_keys(
+        dict,
+        "pipeline",
+        &[
+            "detector",
+            "cost",
+            "constraints",
+            "stopping",
+            "preprocess",
+            "seed",
+        ],
+    )?;
+
+    let detector_value = required_dict_key(dict, "detector", "pipeline")?;
+    let detector = parse_pipeline_detector(&detector_value)?;
+
+    let cost = match dict.get_item("cost")? {
+        Some(value) if !value.is_none() => parse_pipeline_cost(&value)?,
+        _ => DoctorCostConfig::L2,
+    };
+    let constraints = parse_constraints(dict.get_item("constraints")?.as_ref())?;
+    let stopping = parse_stopping(dict.get_item("stopping")?.as_ref())?;
+    let seed =
+        match dict.get_item("seed")? {
+            Some(value) if !value.is_none() => Some(value.extract::<u64>().map_err(|_| {
+                PyTypeError::new_err("pipeline.seed must be an integer when provided")
+            })?),
+            _ => None,
+        };
+
+    #[cfg(feature = "preprocess")]
+    let preprocess = match dict.get_item("preprocess")? {
+        Some(value) if !value.is_none() => {
+            parse_preprocess(Some(&value))?.map(|p| p.config().clone())
+        }
+        _ => None,
+    };
+    #[cfg(not(feature = "preprocess"))]
+    let preprocess = {
+        parse_preprocess(dict.get_item("preprocess")?.as_ref())?;
+        None
+    };
+
+    Ok(DoctorPipelineSpec {
+        detector: DoctorDetectorConfig::Offline(detector),
+        cost,
+        preprocess,
+        constraints,
+        stopping: Some(stopping),
+        seed,
+    })
 }
 
 #[cfg(feature = "preprocess")]
@@ -1896,10 +2094,11 @@ impl PyPageHinkley {
 /// Low-level power-user API for fully-specified offline detection.
 #[allow(clippy::too_many_arguments)]
 #[pyfunction]
-#[pyo3(signature = (x, *, detector = "pelt", cost = "l2", constraints = None, stopping = None, preprocess = None, repro_mode = "balanced", return_diagnostics = true))]
+#[pyo3(signature = (x, *, pipeline = None, detector = "pelt", cost = "l2", constraints = None, stopping = None, preprocess = None, repro_mode = "balanced", return_diagnostics = true))]
 fn detect_offline(
     py: Python<'_>,
     x: &Bound<'_, PyAny>,
+    pipeline: Option<&Bound<'_, PyAny>>,
     detector: &str,
     cost: &str,
     constraints: Option<&Bound<'_, PyAny>>,
@@ -1908,6 +2107,63 @@ fn detect_offline(
     repro_mode: &str,
     return_diagnostics: bool,
 ) -> PyResult<PyOfflineChangePointResult> {
+    let pipeline = match pipeline {
+        Some(value) if !value.is_none() => Some(value),
+        _ => None,
+    };
+    let constraints = match constraints {
+        Some(value) if !value.is_none() => Some(value),
+        _ => None,
+    };
+    let stopping = match stopping {
+        Some(value) if !value.is_none() => Some(value),
+        _ => None,
+    };
+    let preprocess = match preprocess {
+        Some(value) if !value.is_none() => Some(value),
+        _ => None,
+    };
+
+    if pipeline.is_some() {
+        let custom_legacy_args = !detector.eq_ignore_ascii_case("pelt")
+            || !cost.eq_ignore_ascii_case("l2")
+            || constraints.is_some()
+            || stopping.is_some()
+            || preprocess.is_some();
+        if custom_legacy_args {
+            return Err(PyValueError::new_err(
+                "detect_offline accepts either pipeline=... or explicit detector/cost/constraints/stopping/preprocess arguments, not both",
+            ));
+        }
+    }
+
+    let repro_mode = parse_repro_mode(repro_mode)?;
+    let owned = parse_owned_series(py, x)?;
+
+    if let Some(pipeline) = pipeline {
+        let pipeline = parse_pipeline_spec(pipeline)?;
+        let mut result = py
+            .allow_threads(|| {
+                let view = owned.view()?;
+                execute_doctor_pipeline(&view, &pipeline)
+            })
+            .map_err(cpd_error_to_pyerr)?;
+
+        if !return_diagnostics {
+            result.diagnostics.notes.clear();
+            result.diagnostics.warnings.clear();
+        }
+        if !matches!(repro_mode, ReproMode::Balanced) {
+            result.diagnostics.notes.push(
+                "pipeline execution currently uses balanced reproducibility mode".to_string(),
+            );
+        }
+        for note in owned.diagnostics() {
+            result.diagnostics.notes.push(format!("input: {note}"));
+        }
+        return Ok(result.into());
+    }
+
     let detector = PyDetectorKind::parse(detector)?;
     let cost = PyCostModel::parse(cost)?;
     let constraints = parse_constraints(constraints)?;
@@ -1916,8 +2172,6 @@ fn detect_offline(
     let preprocess_pipeline = parse_preprocess(preprocess)?;
     #[cfg(not(feature = "preprocess"))]
     parse_preprocess(preprocess)?;
-    let repro_mode = parse_repro_mode(repro_mode)?;
-    let owned = parse_owned_series(py, x)?;
 
     #[cfg(feature = "preprocess")]
     let (mut result, preprocess_notes) = py
@@ -2281,6 +2535,47 @@ mod tests {
                 .extract()
                 .expect("low breakpoints should extract");
             assert_eq!(class_breakpoints, low_breakpoints);
+        });
+    }
+
+    #[test]
+    fn detect_offline_pipeline_spec_matches_explicit_arguments() {
+        with_python(|py| {
+            let module = PyModule::new(py, "_cpd_rs").expect("module should be created");
+            _cpd_rs(&module).expect("module registration should succeed");
+
+            let locals = PyDict::new(py);
+            locals
+                .set_item("cpd_rs", &module)
+                .expect("locals should accept module");
+            run_python(
+                py,
+                "import numpy as np\nx = np.array([0.,0.,0.,0.,10.,10.,10.,10.,-5.,-5.,-5.,-5.], dtype=np.float64)\npipeline = {'detector': {'kind': 'pelt'}, 'cost': 'l2', 'constraints': {'min_segment_len': 2}, 'stopping': {'n_bkps': 2}}\npipeline_result = cpd_rs.detect_offline(x, pipeline=pipeline)\nexplicit_result = cpd_rs.detect_offline(x, detector='pelt', cost='l2', constraints={'min_segment_len': 2}, stopping={'n_bkps': 2})",
+                None,
+                Some(&locals),
+            )
+            .expect("pipeline and explicit calls should succeed");
+
+            let pipeline_result = locals
+                .get_item("pipeline_result")
+                .expect("locals lookup should succeed")
+                .expect("pipeline_result should exist");
+            let explicit_result = locals
+                .get_item("explicit_result")
+                .expect("locals lookup should succeed")
+                .expect("explicit_result should exist");
+
+            let pipeline_breakpoints: Vec<usize> = pipeline_result
+                .getattr("breakpoints")
+                .expect("pipeline breakpoints should exist")
+                .extract()
+                .expect("pipeline breakpoints should extract");
+            let explicit_breakpoints: Vec<usize> = explicit_result
+                .getattr("breakpoints")
+                .expect("explicit breakpoints should exist")
+                .extract()
+                .expect("explicit breakpoints should extract");
+            assert_eq!(pipeline_breakpoints, explicit_breakpoints);
         });
     }
 
