@@ -40,7 +40,9 @@ mod tests {
     #[cfg(feature = "serde")]
     use super::run_pipeline_json;
     use cpd_core::{Constraints, MemoryLayout, MissingPolicy, Stopping, TimeIndex, TimeSeriesView};
-    use cpd_doctor::{CostConfig, DetectorConfig, OfflineDetectorConfig, PipelineSpec};
+    use cpd_doctor::{
+        CostConfig, DetectorConfig, Objective, OfflineDetectorConfig, PipelineSpec, recommend,
+    };
 
     fn univariate(values: &[f64]) -> TimeSeriesView<'_> {
         TimeSeriesView::from_f64(
@@ -81,6 +83,25 @@ mod tests {
         assert_eq!(result.breakpoints, vec![3, 6, 9]);
     }
 
+    #[test]
+    fn run_pipeline_executes_doctor_recommendation_pipeline() {
+        let mut values = vec![0.0; 96];
+        for item in values.iter_mut().take(64).skip(32) {
+            *item = 7.0;
+        }
+        for item in values.iter_mut().skip(64) {
+            *item = -2.0;
+        }
+        let view = univariate(&values);
+
+        let recommendations =
+            recommend(&view, Objective::Balanced, false, None, 0.20, true).expect("recommend");
+        let pipeline = &recommendations[0].pipeline;
+
+        let result = run_pipeline(&view, pipeline).expect("doctor pipeline should execute");
+        assert_eq!(result.breakpoints.last().copied(), Some(values.len()));
+    }
+
     #[cfg(feature = "serde")]
     #[test]
     fn run_pipeline_json_executes_rust_serde_spec() {
@@ -107,5 +128,27 @@ mod tests {
 
         let result = run_pipeline_json(&view, &encoded).expect("pipeline json should execute");
         assert_eq!(result.breakpoints, vec![3, 6, 9]);
+    }
+
+    #[cfg(feature = "serde")]
+    #[test]
+    fn run_pipeline_json_executes_serialized_doctor_recommendation_pipeline() {
+        let mut values = vec![0.0; 96];
+        for item in values.iter_mut().take(64).skip(32) {
+            *item = 7.0;
+        }
+        for item in values.iter_mut().skip(64) {
+            *item = -2.0;
+        }
+        let view = univariate(&values);
+
+        let recommendations =
+            recommend(&view, Objective::Balanced, false, None, 0.20, true).expect("recommend");
+        let encoded = serde_json::to_string(&recommendations[0].pipeline)
+            .expect("doctor pipeline should serialize");
+
+        let result =
+            run_pipeline_json(&view, &encoded).expect("serialized doctor pipeline should execute");
+        assert_eq!(result.breakpoints.last().copied(), Some(values.len()));
     }
 }

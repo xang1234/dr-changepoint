@@ -3286,6 +3286,31 @@ mod tests {
         u * 2.0 - 1.0
     }
 
+    fn collect_offline_coverage(
+        recommendations: &[super::Recommendation],
+        detectors: &mut BTreeSet<&'static str>,
+        costs: &mut BTreeSet<&'static str>,
+    ) {
+        for recommendation in recommendations {
+            let pipeline = recommendation
+                .pipeline
+                .to_pipeline_config()
+                .expect("pipeline should convert");
+            if let PipelineConfig::Offline { detector, cost, .. } = pipeline {
+                detectors.insert(match detector {
+                    OfflineDetectorConfig::Pelt(_) => "pelt",
+                    OfflineDetectorConfig::BinSeg(_) => "binseg",
+                    OfflineDetectorConfig::Wbs(_) => "wbs",
+                });
+                costs.insert(match cost {
+                    OfflineCostKind::L2 => "l2",
+                    OfflineCostKind::Normal => "normal",
+                    OfflineCostKind::Nig => "nig",
+                });
+            }
+        }
+    }
+
     fn base_summary() -> super::DiagnosticsSummary {
         super::DiagnosticsSummary {
             valid_dimensions: 1,
@@ -4070,6 +4095,99 @@ mod tests {
             path_ids.len(),
             path_ids
         );
+    }
+
+    #[test]
+    fn recommend_fixture_suite_covers_all_current_offline_detectors_and_costs() {
+        let mut detectors = BTreeSet::new();
+        let mut costs = BTreeSet::new();
+
+        let mut state = 101_u64;
+        let large_noise = (0..120_000)
+            .map(|_| pseudo_uniform_noise(&mut state))
+            .collect::<Vec<_>>();
+        let large_noise_view = make_univariate_view(&large_noise);
+        let large_noise_recommendations =
+            recommend(&large_noise_view, Objective::Speed, false, None, 0.20, true)
+                .expect("large noise recommendation");
+        collect_offline_coverage(&large_noise_recommendations, &mut detectors, &mut costs);
+
+        let mut ar = vec![0.0; 120_000];
+        for t in 1..ar.len() {
+            ar[t] = 0.88 * ar[t - 1] + 0.2 * pseudo_uniform_noise(&mut state);
+        }
+        let ar_view = make_univariate_view(&ar);
+        let ar_recommendations = recommend(&ar_view, Objective::Accuracy, false, None, 0.20, true)
+            .expect("ar recommendation");
+        collect_offline_coverage(&ar_recommendations, &mut detectors, &mut costs);
+
+        let mut heavy = Vec::with_capacity(120_000);
+        for idx in 0..120_000 {
+            let mut v = pseudo_uniform_noise(&mut state);
+            if idx % 13 == 0 {
+                v *= 18.0;
+            }
+            heavy.push(v);
+        }
+        let heavy_view = make_univariate_view(&heavy);
+        let heavy_recommendations =
+            recommend(&heavy_view, Objective::Robustness, false, None, 0.20, true)
+                .expect("heavy recommendation");
+        collect_offline_coverage(&heavy_recommendations, &mut detectors, &mut costs);
+
+        let mut masked_values = vec![0.0; 2_000];
+        for item in masked_values.iter_mut().take(2_000).skip(1_000) {
+            *item = 9.0;
+        }
+        let mut mask = vec![0_u8; 2_000];
+        for item in mask.iter_mut().take(900).skip(500) {
+            *item = 1;
+        }
+        let masked_view = make_univariate_view_with_mask(&masked_values, &mask);
+        let masked_recommendations =
+            recommend(&masked_view, Objective::Accuracy, false, None, 0.20, true)
+                .expect("masked recommendation");
+        collect_offline_coverage(&masked_recommendations, &mut detectors, &mut costs);
+
+        let mut short_values = vec![0.0; 256];
+        for item in short_values.iter_mut().skip(128) {
+            *item = 6.0;
+        }
+        let short_view = make_univariate_view(&short_values);
+        let short_recommendations =
+            recommend(&short_view, Objective::Balanced, false, None, 0.20, true)
+                .expect("short recommendation");
+        collect_offline_coverage(&short_recommendations, &mut detectors, &mut costs);
+
+        let expected_detectors = ["binseg", "pelt", "wbs"]
+            .into_iter()
+            .collect::<BTreeSet<_>>();
+        let expected_costs = ["l2", "nig", "normal"].into_iter().collect::<BTreeSet<_>>();
+
+        assert_eq!(detectors, expected_detectors);
+        assert_eq!(costs, expected_costs);
+    }
+
+    #[test]
+    fn recommend_top_pipeline_executes_end_to_end() {
+        let mut values = vec![0.0; 180];
+        for item in values.iter_mut().take(120).skip(60) {
+            *item = 7.0;
+        }
+        for item in values.iter_mut().skip(120) {
+            *item = -4.0;
+        }
+        let view = make_univariate_view(&values);
+
+        let recommendations =
+            recommend(&view, Objective::Balanced, false, None, 0.20, true).expect("recommend");
+        assert!(!recommendations.is_empty());
+
+        let result = super::execute_pipeline(&view, &recommendations[0].pipeline)
+            .expect("top recommendation should execute");
+        assert_eq!(result.breakpoints.last().copied(), Some(values.len()));
+        assert!(!result.diagnostics.algorithm.is_empty());
+        assert!(!result.diagnostics.cost_model.is_empty());
     }
 
     #[test]
