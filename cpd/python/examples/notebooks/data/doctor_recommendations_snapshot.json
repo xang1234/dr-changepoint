@@ -1,0 +1,198 @@
+{
+  "command": "doctor",
+  "input": {
+    "path": "examples/notebooks/data/doctor_series.csv",
+    "format": "csv",
+    "n": 360,
+    "d": 1
+  },
+  "objective": "balanced",
+  "online": false,
+  "min_confidence": 0.2,
+  "allow_abstain": false,
+  "recommendations": [
+    {
+      "rank": 1,
+      "confidence": 0.6430632952973482,
+      "confidence_interval": [
+        0.4412018741617051,
+        0.8449247164329913
+      ],
+      "abstain_reason": null,
+      "warnings": [
+        "Dynp exact DP can be expensive; runtime/memory may grow quickly with larger n and k",
+        "confidence reduced by OOD gating (family=seasonal, divergence=0.072, penalty=0.063, raw=0.740, calibrated=0.686)"
+      ],
+      "pipeline": {
+        "detector": {
+          "Offline": {
+            "SegNeigh": {
+              "stopping": {
+                "Penalized": "BIC"
+              },
+              "cancel_check_every": 1000
+            }
+          }
+        },
+        "cost": "Normal",
+        "preprocess": null,
+        "constraints": {
+          "min_segment_len": 2,
+          "max_change_points": null,
+          "max_depth": null,
+          "candidate_splits": null,
+          "jump": 1,
+          "time_budget_ms": null,
+          "max_cost_evals": null,
+          "memory_budget_bytes": null,
+          "max_cache_bytes": null,
+          "cache_policy": "Full",
+          "degradation_plan": [],
+          "allow_algorithm_fallback": false
+        },
+        "stopping": {
+          "Penalized": "BIC"
+        },
+        "seed": null
+      },
+      "explanation": {
+        "summary": "Dynp + Normal because small-n branch uses exact Dynp dynamic programming",
+        "drivers": [
+          {
+            "key": "regime_change_proxy",
+            "value": 1.5393440839226527
+          },
+          {
+            "key": "change_density_score",
+            "value": 1.0
+          },
+          {
+            "key": "nan_rate",
+            "value": 0.0
+          }
+        ],
+        "tradeoffs": [
+          "Tradeoff: speed 0.55, accuracy 0.88, robustness 0.60.",
+          "No approximation mapping required for this path."
+        ]
+      },
+      "resource_estimate": {
+        "time_complexity": "O(k*n^2)",
+        "memory_complexity": "O(k*n + n)",
+        "relative_time_score": 0.92,
+        "relative_memory_score": 0.78
+      },
+      "validation": null,
+      "objective_fit": [
+        {
+          "key": "balanced",
+          "value": 0.6754
+        },
+        {
+          "key": "speed",
+          "value": 0.626
+        },
+        {
+          "key": "accuracy",
+          "value": 0.7745000000000001
+        },
+        {
+          "key": "robustness",
+          "value": 0.6625
+        }
+      ]
+    },
+    {
+      "rank": 2,
+      "confidence": 0.4980367828963729,
+      "confidence_interval": [
+        0.25991873366048596,
+        0.7361548321322597
+      ],
+      "abstain_reason": null,
+      "warnings": [
+        "safe baseline candidate",
+        "confidence reduced by OOD gating (family=seasonal, divergence=0.072, penalty=0.063, raw=0.560, calibrated=0.532)"
+      ],
+      "pipeline": {
+        "detector": {
+          "Offline": {
+            "Pelt": {
+              "stopping": {
+                "Penalized": "BIC"
+              },
+              "params_per_segment": 2,
+              "cancel_check_every": 1000
+            }
+          }
+        },
+        "cost": "L2",
+        "preprocess": null,
+        "constraints": {
+          "min_segment_len": 2,
+          "max_change_points": null,
+          "max_depth": null,
+          "candidate_splits": null,
+          "jump": 1,
+          "time_budget_ms": null,
+          "max_cost_evals": null,
+          "memory_budget_bytes": null,
+          "max_cache_bytes": null,
+          "cache_policy": "Full",
+          "degradation_plan": [],
+          "allow_algorithm_fallback": false
+        },
+        "stopping": {
+          "Penalized": "BIC"
+        },
+        "seed": null
+      },
+      "explanation": {
+        "summary": "PELT + L2 because safe offline fallback when recommendation confidence is low",
+        "drivers": [
+          {
+            "key": "change_density_score",
+            "value": 1.0
+          },
+          {
+            "key": "regime_change_proxy",
+            "value": 1.5393440839226527
+          },
+          {
+            "key": "nan_rate",
+            "value": 0.0
+          }
+        ],
+        "tradeoffs": [
+          "Tradeoff: speed 0.90, accuracy 0.72, robustness 0.55.",
+          "No approximation mapping required for this path."
+        ]
+      },
+      "resource_estimate": {
+        "time_complexity": "O(n) avg / O(n^2) worst",
+        "memory_complexity": "O(n)",
+        "relative_time_score": 0.45,
+        "relative_memory_score": 0.4
+      },
+      "validation": null,
+      "objective_fit": [
+        {
+          "key": "balanced",
+          "value": 0.7251000000000001
+        },
+        {
+          "key": "speed",
+          "value": 0.794
+        },
+        {
+          "key": "accuracy",
+          "value": 0.713
+        },
+        {
+          "key": "robustness",
+          "value": 0.645
+        }
+      ]
+    }
+  ]
+}

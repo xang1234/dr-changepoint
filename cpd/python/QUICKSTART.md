@@ -140,3 +140,17 @@ cpd/python/.venv/bin/python cpd/python/examples/plot_breakpoints.py --out /tmp/c
 
 Example scripts are exercised in CI/smoke coverage via
 `cpd/python/tests/test_integration_mvp_a.py`.
+
+## 7. Open notebook quickstarts
+
+```bash
+cd cpd/python
+python -m pip install jupyter matplotlib
+jupyter lab
+```
+
+Then open:
+
+- `examples/notebooks/01_offline_algorithms.ipynb`
+- `examples/notebooks/02_online_algorithms.ipynb`
+- `examples/notebooks/03_doctor_recommendations.ipynb`

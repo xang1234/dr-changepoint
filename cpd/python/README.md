@@ -235,6 +235,20 @@ cpd/python/.venv/bin/python cpd/python/examples/csv_detect.py --csv /path/to/dat
 cpd/python/.venv/bin/python cpd/python/examples/plot_breakpoints.py --out /tmp/cpd_breakpoints.png
 ```
 
+## Notebook Examples
+
+- `examples/notebooks/01_offline_algorithms.ipynb`: quick comparison of offline detectors (`Pelt`, `Binseg`, `Fpop`, `segneigh`, and pipeline-form `wbs`).
+- `examples/notebooks/02_online_algorithms.ipynb`: streaming workflows for `Bocpd`, `Cusum`, and `PageHinkley`.
+- `examples/notebooks/03_doctor_recommendations.ipynb`: doctor recommendation workflow with live CLI execution and snapshot fallback.
+- `examples/notebooks/README.md`: notebook launch instructions and workflow overview.
+
+Launch from `cpd/python`:
+
+```bash
+python -m pip install jupyter matplotlib
+jupyter lab
+```
+
 ## Ruptures Parity Suite
 
 To run the differential parity suite locally (after installing `ruptures` in the active
