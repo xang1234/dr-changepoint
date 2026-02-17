@@ -78,6 +78,16 @@ and `fast`.
 For deterministic contracts, cross-platform expectations, and tolerance gates,
 see [`../docs/reproducibility_modes.md`](../docs/reproducibility_modes.md).
 
+## Result JSON Contract
+
+`OfflineChangePointResult.to_json()` follows the versioned contract in
+[`../docs/result_json_contract.md`](../docs/result_json_contract.md), with the
+canonical schema marker at `diagnostics.schema_version`.
+
+In `0.x`, schema compatibility follows the N-1 policy from
+[`../VERSIONING.md`](../VERSIONING.md): readers accept current and additive
+forward-compatible payloads within the supported version window.
+
 Minimal example:
 
 ```python

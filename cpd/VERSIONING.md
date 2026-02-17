@@ -39,6 +39,10 @@ For offline result payloads in `0.x`, the canonical schema marker is:
 
 Current persisted offline result contract is schema version `1`.
 
+Detailed field and error-message contract:
+
+- `cpd/docs/result_json_contract.md`
+
 ### Top-level envelope
 
 A top-level envelope marker for result payloads is planned as a future migration
@@ -82,6 +86,8 @@ Parameter defaults and validation semantics:
   `N-1`.
 - This issue establishes the policy and CI fixtures; runtime migration shims for
   future schema bumps are tracked as follow-up implementation work.
+- Offline result compatibility fixtures live under:
+  `cpd/tests/fixtures/migrations/result/`.
 
 ## Checkpoint Compatibility Policy
 
