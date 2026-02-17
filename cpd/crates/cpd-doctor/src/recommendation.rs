@@ -12,8 +12,8 @@ use cpd_core::{
     validate_constraints_config,
 };
 use cpd_costs::{
-    CostAR, CostL1Median, CostL2Mean, CostModel, CostNIGMarginal, CostNormalFullCov,
-    CostNormalMeanVar,
+    CostAR, CostCosine, CostL1Median, CostL2Mean, CostModel, CostNIGMarginal, CostNormalFullCov,
+    CostNormalMeanVar, CostRank,
 };
 use cpd_offline::{
     BinSeg, BinSegConfig, Fpop, FpopConfig, Pelt, PeltConfig, Wbs, WbsConfig, WbsIntervalStrategy,
@@ -288,11 +288,13 @@ impl PipelineSpec {
             DetectorConfig::Offline(detector) => {
                 let cost = match self.cost {
                     CostConfig::Ar => OfflineCostKind::Ar,
+                    CostConfig::Cosine => OfflineCostKind::Cosine,
                     CostConfig::L1Median => OfflineCostKind::L1Median,
                     CostConfig::L2 => OfflineCostKind::L2,
                     CostConfig::Normal => OfflineCostKind::Normal,
                     CostConfig::NormalFullCov => OfflineCostKind::NormalFullCov,
                     CostConfig::Nig => OfflineCostKind::Nig,
+                    CostConfig::Rank => OfflineCostKind::Rank,
                     CostConfig::None => {
                         return Err(CpdError::invalid_input(
                             "offline pipeline requires a concrete offline cost",
@@ -491,11 +493,13 @@ pub enum OnlineDetectorKind {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CostConfig {
     Ar,
+    Cosine,
     L1Median,
     L2,
     Normal,
     NormalFullCov,
     Nig,
+    Rank,
     None,
 }
 
@@ -503,11 +507,13 @@ impl From<OfflineCostKind> for CostConfig {
     fn from(value: OfflineCostKind) -> Self {
         match value {
             OfflineCostKind::Ar => Self::Ar,
+            OfflineCostKind::Cosine => Self::Cosine,
             OfflineCostKind::L1Median => Self::L1Median,
             OfflineCostKind::L2 => Self::L2,
             OfflineCostKind::Normal => Self::Normal,
             OfflineCostKind::NormalFullCov => Self::NormalFullCov,
             OfflineCostKind::Nig => Self::Nig,
+            OfflineCostKind::Rank => Self::Rank,
         }
     }
 }
@@ -537,11 +543,13 @@ pub enum OfflineDetectorConfig {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OfflineCostKind {
     Ar,
+    Cosine,
     L1Median,
     L2,
     Normal,
     NormalFullCov,
     Nig,
+    Rank,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -1249,6 +1257,9 @@ fn run_offline_pipeline_with_config(
         OfflineCostKind::Ar => {
             run_offline_detector_with_cost(detect_view, detector, &ctx, CostAR::new(1, repro_mode))
         }
+        OfflineCostKind::Cosine => {
+            run_offline_detector_with_cost(detect_view, detector, &ctx, CostCosine::new(repro_mode))
+        }
         OfflineCostKind::L1Median => run_offline_detector_with_cost(
             detect_view,
             detector,
@@ -1276,6 +1287,9 @@ fn run_offline_pipeline_with_config(
             &ctx,
             CostNIGMarginal::new(repro_mode),
         ),
+        OfflineCostKind::Rank => {
+            run_offline_detector_with_cost(detect_view, detector, &ctx, CostRank::new(repro_mode))
+        }
     }
 }
 
@@ -1806,11 +1820,17 @@ fn multivariate_pipeline_warnings(
                 OfflineCostKind::Ar => Some(
                     "multivariate semantics: CostAR fits autoregressive residual models independently per dimension and sums segment costs",
                 ),
+                OfflineCostKind::Cosine => Some(
+                    "multivariate semantics: CostCosine scores directional coherence from row-wise unit-vector resultants (captures direction shifts while being scale-invariant)",
+                ),
                 OfflineCostKind::L2 => Some(
                     "multivariate semantics: CostL2Mean computes additive per-dimension SSE and sums across dimensions",
                 ),
                 OfflineCostKind::L1Median => Some(
                     "multivariate semantics: CostL1Median computes per-dimension median absolute deviation costs and sums across dimensions",
+                ),
+                OfflineCostKind::Rank => Some(
+                    "multivariate semantics: CostRank applies per-dimension rank transforms, then sums additive per-dimension rank-SSE costs",
                 ),
             };
             message
@@ -3201,6 +3221,7 @@ fn pipeline_label(pipeline: &PipelineConfig) -> &'static str {
     match pipeline {
         PipelineConfig::Offline { detector, cost, .. } => match (detector, cost) {
             (OfflineDetectorConfig::Pelt(_), OfflineCostKind::Ar) => "PELT + AR",
+            (OfflineDetectorConfig::Pelt(_), OfflineCostKind::Cosine) => "PELT + Cosine",
             (OfflineDetectorConfig::Pelt(_), OfflineCostKind::L1Median) => "PELT + L1 median",
             (OfflineDetectorConfig::Pelt(_), OfflineCostKind::L2) => "PELT + L2",
             (OfflineDetectorConfig::Pelt(_), OfflineCostKind::Normal) => "PELT + Normal",
@@ -3208,7 +3229,9 @@ fn pipeline_label(pipeline: &PipelineConfig) -> &'static str {
                 "PELT + Normal (full covariance)"
             }
             (OfflineDetectorConfig::Pelt(_), OfflineCostKind::Nig) => "PELT + NIG",
+            (OfflineDetectorConfig::Pelt(_), OfflineCostKind::Rank) => "PELT + Rank",
             (OfflineDetectorConfig::BinSeg(_), OfflineCostKind::Ar) => "BinSeg + AR",
+            (OfflineDetectorConfig::BinSeg(_), OfflineCostKind::Cosine) => "BinSeg + Cosine",
             (OfflineDetectorConfig::BinSeg(_), OfflineCostKind::L1Median) => "BinSeg + L1 median",
             (OfflineDetectorConfig::BinSeg(_), OfflineCostKind::Normal) => "BinSeg + Normal",
             (OfflineDetectorConfig::BinSeg(_), OfflineCostKind::NormalFullCov) => {
@@ -3216,15 +3239,19 @@ fn pipeline_label(pipeline: &PipelineConfig) -> &'static str {
             }
             (OfflineDetectorConfig::BinSeg(_), OfflineCostKind::L2) => "BinSeg + L2",
             (OfflineDetectorConfig::BinSeg(_), OfflineCostKind::Nig) => "BinSeg + NIG",
+            (OfflineDetectorConfig::BinSeg(_), OfflineCostKind::Rank) => "BinSeg + Rank",
             (OfflineDetectorConfig::Fpop(_), OfflineCostKind::L2) => "FPOP + L2",
             (OfflineDetectorConfig::Fpop(_), OfflineCostKind::Ar)
+            | (OfflineDetectorConfig::Fpop(_), OfflineCostKind::Cosine)
             | (OfflineDetectorConfig::Fpop(_), OfflineCostKind::L1Median)
             | (OfflineDetectorConfig::Fpop(_), OfflineCostKind::Normal)
             | (OfflineDetectorConfig::Fpop(_), OfflineCostKind::NormalFullCov)
-            | (OfflineDetectorConfig::Fpop(_), OfflineCostKind::Nig) => {
+            | (OfflineDetectorConfig::Fpop(_), OfflineCostKind::Nig)
+            | (OfflineDetectorConfig::Fpop(_), OfflineCostKind::Rank) => {
                 "FPOP + non-L2 (unsupported)"
             }
             (OfflineDetectorConfig::Wbs(_), OfflineCostKind::Ar) => "WBS + AR",
+            (OfflineDetectorConfig::Wbs(_), OfflineCostKind::Cosine) => "WBS + Cosine",
             (OfflineDetectorConfig::Wbs(_), OfflineCostKind::L1Median) => "WBS + L1 median",
             (OfflineDetectorConfig::Wbs(_), OfflineCostKind::L2) => "WBS + L2",
             (OfflineDetectorConfig::Wbs(_), OfflineCostKind::Normal) => "WBS + Normal",
@@ -3232,6 +3259,7 @@ fn pipeline_label(pipeline: &PipelineConfig) -> &'static str {
                 "WBS + Normal (full covariance)"
             }
             (OfflineDetectorConfig::Wbs(_), OfflineCostKind::Nig) => "WBS + NIG",
+            (OfflineDetectorConfig::Wbs(_), OfflineCostKind::Rank) => "WBS + Rank",
         },
         PipelineConfig::Online { detector } => match detector {
             OnlineDetectorConfig::Bocpd(config) => match config.observation {
@@ -3431,11 +3459,13 @@ fn pipeline_id(pipeline: &PipelineConfig) -> String {
             };
             let cost_name = match cost {
                 OfflineCostKind::Ar => "ar",
+                OfflineCostKind::Cosine => "cosine",
                 OfflineCostKind::L1Median => "l1_median",
                 OfflineCostKind::L2 => "l2",
                 OfflineCostKind::Normal => "normal",
                 OfflineCostKind::NormalFullCov => "normal_full_cov",
                 OfflineCostKind::Nig => "nig",
+                OfflineCostKind::Rank => "rank",
             };
             format!(
                 "offline:{detector_name}:{cost_name}:jump={}",
@@ -3571,11 +3601,13 @@ mod tests {
                 });
                 costs.insert(match cost {
                     OfflineCostKind::Ar => "ar",
+                    OfflineCostKind::Cosine => "cosine",
                     OfflineCostKind::L1Median => "l1_median",
                     OfflineCostKind::L2 => "l2",
                     OfflineCostKind::Normal => "normal",
                     OfflineCostKind::NormalFullCov => "normal_full_cov",
                     OfflineCostKind::Nig => "nig",
+                    OfflineCostKind::Rank => "rank",
                 });
             }
         }
