@@ -51,6 +51,11 @@ harness = false
 path = "benches/offline_pelt.rs"
 
 [[bench]]
+name = "offline_fpop"
+harness = false
+path = "benches/offline_fpop.rs"
+
+[[bench]]
 name = "offline_binseg"
 harness = false
 path = "benches/offline_binseg.rs"

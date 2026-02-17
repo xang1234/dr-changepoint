@@ -5,6 +5,7 @@
 pub mod binseg;
 pub mod bottomup;
 pub mod dynp;
+pub mod fpop;
 pub mod pelt;
 #[cfg(feature = "serde")]
 pub mod schema_migration;
@@ -14,6 +15,7 @@ pub mod window;
 pub use binseg::{BinSeg, BinSegConfig};
 pub use bottomup::{BottomUp, BottomUpConfig};
 pub use dynp::{Dynp, DynpConfig};
+pub use fpop::{Fpop, FpopConfig};
 pub use pelt::{Pelt, PeltConfig};
 #[cfg(feature = "serde")]
 pub use schema_migration::{BinSegConfigWire, PeltConfigWire, WbsConfigWire};
