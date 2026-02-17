@@ -26,7 +26,7 @@ use cpd_doctor::{
 };
 use cpd_offline::{
     BinSeg as OfflineBinSeg, BinSegConfig, Fpop as OfflineFpop, FpopConfig, Pelt as OfflinePelt,
-    PeltConfig, WbsConfig, WbsIntervalStrategy,
+    PeltConfig, SegNeigh as OfflineSegNeigh, SegNeighConfig, WbsConfig, WbsIntervalStrategy,
 };
 use cpd_online::{
     AlertPolicy, BocpdConfig, BocpdDetector, BocpdState, ConstantHazard, CusumConfig,
@@ -221,6 +221,7 @@ enum PyDetectorKind {
     Pelt,
     Binseg,
     Fpop,
+    SegNeigh,
 }
 
 impl PyDetectorKind {
@@ -229,8 +230,9 @@ impl PyDetectorKind {
             "pelt" => Ok(Self::Pelt),
             "binseg" => Ok(Self::Binseg),
             "fpop" => Ok(Self::Fpop),
+            "segneigh" | "seg_neigh" | "dynp" => Ok(Self::SegNeigh),
             _ => Err(PyValueError::new_err(format!(
-                "unsupported detector '{detector}'; expected one of: 'pelt', 'binseg', 'fpop'"
+                "unsupported detector '{detector}'; expected one of: 'pelt', 'binseg', 'fpop', 'segneigh'"
             ))),
         }
     }
@@ -1142,6 +1144,29 @@ fn parse_pipeline_fpop_config(dict: &Bound<'_, PyDict>, context: &str) -> PyResu
     Ok(config)
 }
 
+fn parse_pipeline_segneigh_config(
+    dict: &Bound<'_, PyDict>,
+    context: &str,
+) -> PyResult<SegNeighConfig> {
+    let mut config = SegNeighConfig::default();
+    for (key_obj, value_obj) in dict.iter() {
+        let key: String = key_obj
+            .extract()
+            .map_err(|_| PyTypeError::new_err(format!("{context} keys must be strings")))?;
+        match key.as_str() {
+            "kind" => {}
+            "stopping" => config.stopping = parse_pipeline_stopping_compat(Some(&value_obj))?,
+            "cancel_check_every" => config.cancel_check_every = value_obj.extract::<usize>()?,
+            _ => {
+                return Err(PyValueError::new_err(format!(
+                    "unsupported {context} key '{key}' for detector kind='segneigh'"
+                )));
+            }
+        }
+    }
+    Ok(config)
+}
+
 fn parse_pipeline_wbs_config(dict: &Bound<'_, PyDict>, context: &str) -> PyResult<WbsConfig> {
     let mut config = WbsConfig::default();
     for (key_obj, value_obj) in dict.iter() {
@@ -1194,6 +1219,14 @@ fn parse_pipeline_detector_kind(
             )),
             None => Ok(DoctorOfflineDetectorConfig::Fpop(FpopConfig::default())),
         },
+        "segneigh" | "seg_neigh" | "dynp" => match dict {
+            Some(dict) => Ok(DoctorOfflineDetectorConfig::SegNeigh(
+                parse_pipeline_segneigh_config(dict, "pipeline.detector")?,
+            )),
+            None => Ok(DoctorOfflineDetectorConfig::SegNeigh(
+                SegNeighConfig::default(),
+            )),
+        },
         "wbs" => match dict {
             Some(dict) => Ok(DoctorOfflineDetectorConfig::Wbs(parse_pipeline_wbs_config(
                 dict,
@@ -1202,7 +1235,7 @@ fn parse_pipeline_detector_kind(
             None => Ok(DoctorOfflineDetectorConfig::Wbs(WbsConfig::default())),
         },
         _ => Err(PyValueError::new_err(format!(
-            "unsupported pipeline.detector.kind '{kind}'; expected one of: 'pelt', 'binseg', 'fpop', 'wbs'"
+            "unsupported pipeline.detector.kind '{kind}'; expected one of: 'pelt', 'binseg', 'fpop', 'segneigh', 'wbs'"
         ))),
     }
 }
@@ -1225,7 +1258,7 @@ fn parse_pipeline_detector_serde(
             .map_err(|_| PyTypeError::new_err("pipeline.detector['Offline'] must be a dict"))?;
         if offline.len() != 1 {
             return Err(PyValueError::new_err(
-                "pipeline.detector['Offline'] must contain exactly one key: 'Pelt', 'BinSeg', 'Fpop', or 'Wbs'",
+                "pipeline.detector['Offline'] must contain exactly one key: 'Pelt', 'BinSeg', 'Fpop', 'SegNeigh', or 'Wbs'",
             ));
         }
 
@@ -1251,12 +1284,18 @@ fn parse_pipeline_detector_serde(
             "fpop" => Ok(DoctorOfflineDetectorConfig::Fpop(
                 parse_pipeline_fpop_config(&config, "pipeline.detector['Offline']['Fpop']")?,
             )),
+            "segneigh" | "dynp" => Ok(DoctorOfflineDetectorConfig::SegNeigh(
+                parse_pipeline_segneigh_config(
+                    &config,
+                    "pipeline.detector['Offline']['SegNeigh']",
+                )?,
+            )),
             "wbs" => Ok(DoctorOfflineDetectorConfig::Wbs(parse_pipeline_wbs_config(
                 &config,
                 "pipeline.detector['Offline']['Wbs']",
             )?)),
             _ => Err(PyValueError::new_err(format!(
-                "unsupported pipeline.detector['Offline'] variant '{variant}'; expected one of: 'Pelt', 'BinSeg', 'Fpop', 'Wbs'"
+                "unsupported pipeline.detector['Offline'] variant '{variant}'; expected one of: 'Pelt', 'BinSeg', 'Fpop', 'SegNeigh', 'Wbs'"
             ))),
         };
     }
@@ -1297,6 +1336,7 @@ fn pipeline_detector_stopping(detector: &DoctorOfflineDetectorConfig) -> Stoppin
         DoctorOfflineDetectorConfig::BinSeg(config) => config.stopping.clone(),
         DoctorOfflineDetectorConfig::Fpop(config) => config.stopping.clone(),
         DoctorOfflineDetectorConfig::Wbs(config) => config.stopping.clone(),
+        DoctorOfflineDetectorConfig::SegNeigh(config) => config.stopping.clone(),
     }
 }
 
@@ -1305,7 +1345,8 @@ fn pipeline_detector_seed(detector: &DoctorOfflineDetectorConfig) -> Option<u64>
         DoctorOfflineDetectorConfig::Wbs(config) => Some(config.seed),
         DoctorOfflineDetectorConfig::Pelt(_)
         | DoctorOfflineDetectorConfig::BinSeg(_)
-        | DoctorOfflineDetectorConfig::Fpop(_) => None,
+        | DoctorOfflineDetectorConfig::Fpop(_)
+        | DoctorOfflineDetectorConfig::SegNeigh(_) => None,
     }
 }
 
@@ -1343,6 +1384,14 @@ fn apply_pipeline_controls(
             config.stopping = stopping.clone();
             if let Some(seed_value) = seed {
                 config.seed = seed_value;
+            }
+        }
+        DoctorOfflineDetectorConfig::SegNeigh(config) => {
+            config.stopping = stopping.clone();
+            if seed.is_some() {
+                return Err(PyValueError::new_err(
+                    "pipeline.seed is only supported for detector='wbs'",
+                ));
             }
         }
     }
@@ -1782,6 +1831,54 @@ fn detect_with_view(
                 cancel_check_every: 1000,
             };
             let detector = OfflineFpop::new(CostL2Mean::new(repro_mode), config)?;
+            detector.detect(view, &ctx)
+        }
+        (PyDetectorKind::SegNeigh, PyCostModel::Cosine) => {
+            let config = SegNeighConfig {
+                stopping,
+                cancel_check_every: 1000,
+            };
+            let detector = OfflineSegNeigh::new(CostCosine::new(repro_mode), config)?;
+            detector.detect(view, &ctx)
+        }
+        (PyDetectorKind::SegNeigh, PyCostModel::L1Median) => {
+            let config = SegNeighConfig {
+                stopping,
+                cancel_check_every: 1000,
+            };
+            let detector = OfflineSegNeigh::new(CostL1Median::new(repro_mode), config)?;
+            detector.detect(view, &ctx)
+        }
+        (PyDetectorKind::SegNeigh, PyCostModel::L2) => {
+            let config = SegNeighConfig {
+                stopping,
+                cancel_check_every: 1000,
+            };
+            let detector = OfflineSegNeigh::new(CostL2Mean::new(repro_mode), config)?;
+            detector.detect(view, &ctx)
+        }
+        (PyDetectorKind::SegNeigh, PyCostModel::Normal) => {
+            let config = SegNeighConfig {
+                stopping,
+                cancel_check_every: 1000,
+            };
+            let detector = OfflineSegNeigh::new(CostNormalMeanVar::new(repro_mode), config)?;
+            detector.detect(view, &ctx)
+        }
+        (PyDetectorKind::SegNeigh, PyCostModel::NormalFullCov) => {
+            let config = SegNeighConfig {
+                stopping,
+                cancel_check_every: 1000,
+            };
+            let detector = OfflineSegNeigh::new(CostNormalFullCov::new(repro_mode), config)?;
+            detector.detect(view, &ctx)
+        }
+        (PyDetectorKind::SegNeigh, PyCostModel::Rank) => {
+            let config = SegNeighConfig {
+                stopping,
+                cancel_check_every: 1000,
+            };
+            let detector = OfflineSegNeigh::new(CostRank::new(repro_mode), config)?;
             detector.detect(view, &ctx)
         }
         (
@@ -3119,6 +3216,47 @@ mod tests {
     }
 
     #[test]
+    fn detect_offline_supports_segneigh_detector_and_dynp_alias() {
+        with_python(|py| {
+            let module = PyModule::new(py, "_cpd_rs").expect("module should be created");
+            _cpd_rs(&module).expect("module registration should succeed");
+
+            let locals = PyDict::new(py);
+            locals
+                .set_item("cpd_rs", &module)
+                .expect("locals should accept module");
+            run_python(
+                py,
+                "import numpy as np\nx = np.array([0.,0.,0.,0.,8.,8.,8.,8.,-3.,-3.,-3.,-3.], dtype=np.float64)\nsegneigh_result = cpd_rs.detect_offline(x, detector='segneigh', cost='l2', constraints={'min_segment_len': 2}, stopping={'n_bkps': 2})\ndynp_result = cpd_rs.detect_offline(x, detector='dynp', cost='l2', constraints={'min_segment_len': 2}, stopping={'n_bkps': 2})",
+                None,
+                Some(&locals),
+            )
+            .expect("segneigh and dynp alias should run");
+
+            let segneigh_result = locals
+                .get_item("segneigh_result")
+                .expect("locals lookup should succeed")
+                .expect("segneigh_result should exist");
+            let dynp_result = locals
+                .get_item("dynp_result")
+                .expect("locals lookup should succeed")
+                .expect("dynp_result should exist");
+
+            let segneigh_breakpoints: Vec<usize> = segneigh_result
+                .getattr("breakpoints")
+                .expect("segneigh breakpoints should exist")
+                .extract()
+                .expect("segneigh breakpoints should extract");
+            let dynp_breakpoints: Vec<usize> = dynp_result
+                .getattr("breakpoints")
+                .expect("dynp breakpoints should exist")
+                .extract()
+                .expect("dynp breakpoints should extract");
+            assert_eq!(segneigh_breakpoints, dynp_breakpoints);
+        });
+    }
+
+    #[test]
     fn detect_offline_pipeline_rejects_fpop_with_non_l2_cost() {
         with_python(|py| {
             let pipeline = PyDict::new(py);
@@ -3311,6 +3449,58 @@ mod tests {
                 .extract()
                 .expect("explicit breakpoints should extract");
             assert_eq!(pipeline_breakpoints, explicit_breakpoints);
+        });
+    }
+
+    #[test]
+    fn detect_offline_pipeline_spec_accepts_segneigh_kind_and_serde_shape() {
+        with_python(|py| {
+            let module = PyModule::new(py, "_cpd_rs").expect("module should be created");
+            _cpd_rs(&module).expect("module registration should succeed");
+
+            let locals = PyDict::new(py);
+            locals
+                .set_item("cpd_rs", &module)
+                .expect("locals should accept module");
+            run_python(
+                py,
+                "import numpy as np\nx = np.array([0.,0.,0.,0.,10.,10.,10.,10.,-5.,-5.,-5.,-5.], dtype=np.float64)\nkind_pipeline = {'detector': {'kind': 'segneigh'}, 'cost': 'l2', 'constraints': {'min_segment_len': 2}, 'stopping': {'n_bkps': 2}}\nserde_pipeline = {'detector': {'Offline': {'SegNeigh': {'stopping': {'KnownK': 2}, 'cancel_check_every': 1000}}}, 'cost': 'L2', 'constraints': {'min_segment_len': 2}, 'stopping': {'KnownK': 2}, 'seed': None}\nkind_result = cpd_rs.detect_offline(x, pipeline=kind_pipeline)\nserde_result = cpd_rs.detect_offline(x, pipeline=serde_pipeline)\nexplicit_result = cpd_rs.detect_offline(x, detector='segneigh', cost='l2', constraints={'min_segment_len': 2}, stopping={'n_bkps': 2})",
+                None,
+                Some(&locals),
+            )
+            .expect("segneigh pipelines should run");
+
+            let kind_result = locals
+                .get_item("kind_result")
+                .expect("locals lookup should succeed")
+                .expect("kind_result should exist");
+            let serde_result = locals
+                .get_item("serde_result")
+                .expect("locals lookup should succeed")
+                .expect("serde_result should exist");
+            let explicit_result = locals
+                .get_item("explicit_result")
+                .expect("locals lookup should succeed")
+                .expect("explicit_result should exist");
+
+            let kind_breakpoints: Vec<usize> = kind_result
+                .getattr("breakpoints")
+                .expect("kind breakpoints should exist")
+                .extract()
+                .expect("kind breakpoints should extract");
+            let serde_breakpoints: Vec<usize> = serde_result
+                .getattr("breakpoints")
+                .expect("serde breakpoints should exist")
+                .extract()
+                .expect("serde breakpoints should extract");
+            let explicit_breakpoints: Vec<usize> = explicit_result
+                .getattr("breakpoints")
+                .expect("explicit breakpoints should exist")
+                .extract()
+                .expect("explicit breakpoints should extract");
+
+            assert_eq!(kind_breakpoints, explicit_breakpoints);
+            assert_eq!(serde_breakpoints, explicit_breakpoints);
         });
     }
 

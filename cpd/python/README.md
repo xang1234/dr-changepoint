@@ -24,7 +24,7 @@ before debugging `pyo3`/linker errors.
 - `cpd.Pelt`: high-level PELT detector.
 - `cpd.Binseg`: high-level Binary Segmentation detector.
 - `cpd.Fpop`: high-level FPOP detector (L2 cost only).
-- `cpd.detect_offline`: low-level API for explicit detector/cost/constraints/stopping/preprocess selection.
+- `cpd.detect_offline`: low-level API for explicit detector/cost/constraints/stopping/preprocess selection, including `detector="segneigh"` (exact fixed-K DP; `dynp` alias supported).
 - `cpd.OfflineChangePointResult`: typed result object with breakpoints and diagnostics.
 
 ## Streaming `update()` vs `update_many()` Policy
@@ -66,7 +66,7 @@ spaced weaker changes may be hidden), prefer Wild Binary Segmentation (WBS) in
 Rust/offline flows (`cpd-offline::Wbs`) for stronger recovery.
 
 Python high-level APIs expose `cpd.Pelt`, `cpd.Binseg`, and `cpd.Fpop`.
-WBS is not yet exposed as a Python high-level detector.
+WBS and SegNeigh are not yet exposed as Python high-level detector classes; use `detect_offline(...)`.
 
 ## Quickstart
 
@@ -117,6 +117,13 @@ low = cpd.detect_offline(
         "winsorize": {"lower_quantile": 0.05, "upper_quantile": 0.95},
         "robust_scale": {"mad_epsilon": 1e-9, "normal_consistency": 1.4826},
     },  # optional; requires preprocess feature
+)
+segneigh = cpd.detect_offline(
+    x,
+    detector="segneigh",  # 'dynp' alias also supported
+    cost="l2",
+    constraints={"min_segment_len": 2},
+    stopping={"n_bkps": 2},
 )
 
 payload = pelt.to_json()
@@ -268,9 +275,10 @@ to verify architecture and run the CI-aligned local sanity flow.
   - `.fit(x)` -> detector
   - `.predict(pen=..., n_bkps=...)` -> `OfflineChangePointResult`
 - `detect_offline(x, pipeline=None, detector, cost, constraints, stopping, preprocess, repro_mode, return_diagnostics)`
-  - `detector` accepts `pelt`, `binseg`, or `fpop` (`fpop` requires `cost="l2"`).
+  - `detector` accepts `pelt`, `binseg`, `fpop`, or `segneigh` (`dynp` alias). `fpop` requires `cost="l2"`.
+  - `segneigh` is exact fixed-K dynamic programming (best when `stopping` is `n_bkps`/`KnownK`); runtime/memory can grow quickly on large `n` and high `k`.
   - `cost` accepts `l1_median`, `l2`, `normal`, `normal_full_cov`, and (pipeline-only) `nig`.
-  - `pipeline` accepts both simplified Python dicts (for example `{"detector": {"kind": "pelt"}}`) and Rust `PipelineSpec` serde shape (for example `{"detector": {"Offline": {"Pelt": {...}}}, ...}`).
+  - `pipeline` accepts both simplified Python dicts (for example `{"detector": {"kind": "segneigh"}}`) and Rust `PipelineSpec` serde shape (for example `{"detector": {"Offline": {"SegNeigh": {...}}}, ...}`).
 - `OfflineChangePointResult`
   - fields: `breakpoints`, `change_points`, `scores`, `segments`, `diagnostics`
   - helpers: `to_json()`, `from_json(payload)`, `plot(values=None, *, ax=None, title=...)`

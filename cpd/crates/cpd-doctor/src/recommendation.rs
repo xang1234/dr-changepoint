@@ -16,7 +16,8 @@ use cpd_costs::{
     CostNormalMeanVar, CostRank,
 };
 use cpd_offline::{
-    BinSeg, BinSegConfig, Fpop, FpopConfig, Pelt, PeltConfig, Wbs, WbsConfig, WbsIntervalStrategy,
+    BinSeg, BinSegConfig, Dynp, DynpConfig, Fpop, FpopConfig, Pelt, PeltConfig, Wbs, WbsConfig,
+    WbsIntervalStrategy,
 };
 use cpd_online::{
     BernoulliBetaPrior, BocpdConfig, CusumConfig, GaussianNigPrior, ObservationModel,
@@ -341,6 +342,7 @@ fn extract_stopping(detector: &OfflineDetectorConfig) -> Stopping {
         OfflineDetectorConfig::BinSeg(config) => config.stopping.clone(),
         OfflineDetectorConfig::Fpop(config) => config.stopping.clone(),
         OfflineDetectorConfig::Wbs(config) => config.stopping.clone(),
+        OfflineDetectorConfig::SegNeigh(config) => config.stopping.clone(),
     }
 }
 
@@ -349,7 +351,8 @@ fn extract_seed(detector: &OfflineDetectorConfig) -> Option<u64> {
         OfflineDetectorConfig::Wbs(config) => Some(config.seed),
         OfflineDetectorConfig::Pelt(_)
         | OfflineDetectorConfig::BinSeg(_)
-        | OfflineDetectorConfig::Fpop(_) => None,
+        | OfflineDetectorConfig::Fpop(_)
+        | OfflineDetectorConfig::SegNeigh(_) => None,
     }
 }
 
@@ -413,6 +416,20 @@ fn with_stopping_and_seed(
                 updated.seed = seed_value;
             }
             Ok(OfflineDetectorConfig::Wbs(updated))
+        }
+        OfflineDetectorConfig::SegNeigh(config) => {
+            if config.stopping != *stopping {
+                return Err(CpdError::invalid_input(format!(
+                    "offline pipeline has inconsistent stopping configuration for detector=segneigh: detector.stopping={:?}, pipeline.stopping={:?}",
+                    config.stopping, stopping
+                )));
+            }
+            if seed.is_some() {
+                return Err(CpdError::invalid_input(
+                    "offline pipeline seed is only supported for detector=wbs",
+                ));
+            }
+            Ok(OfflineDetectorConfig::SegNeigh(config.clone()))
         }
     }
 }
@@ -537,6 +554,8 @@ pub enum OfflineDetectorConfig {
     BinSeg(BinSegConfig),
     Fpop(FpopConfig),
     Wbs(WbsConfig),
+    #[cfg_attr(feature = "serde", serde(alias = "Dynp"))]
+    SegNeigh(DynpConfig),
 }
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -1310,6 +1329,9 @@ fn run_offline_detector_with_cost<C: CostModel>(
             Err(CpdError::invalid_input("detector=fpop requires cost=l2"))
         }
         OfflineDetectorConfig::Wbs(config) => Wbs::new(cost_model, config.clone())?.detect(x, ctx),
+        OfflineDetectorConfig::SegNeigh(config) => {
+            Dynp::new(cost_model, config.clone())?.detect(x, ctx)
+        }
     }
 }
 
@@ -1331,6 +1353,9 @@ fn run_offline_detector_with_l2_cost(
         }
         OfflineDetectorConfig::Wbs(config) => {
             Wbs::new(CostL2Mean::new(repro_mode), config.clone())?.detect(x, ctx)
+        }
+        OfflineDetectorConfig::SegNeigh(config) => {
+            Dynp::new(CostL2Mean::new(repro_mode), config.clone())?.detect(x, ctx)
         }
     }
 }
@@ -1443,6 +1468,46 @@ fn pipeline_with_scaled_penalty(
                 },
             )))
         }
+        OfflineDetectorConfig::SegNeigh(config) => {
+            let params_per_segment = model_default_params_per_segment(cost);
+            let Some(stopping) =
+                scaled_stopping(&config.stopping, scale, n, d, params_per_segment)?
+            else {
+                return Ok(None);
+            };
+            let mut scaled = config.clone();
+            scaled.stopping = stopping;
+            Ok(Some(PipelineSpec::from_pipeline_config(
+                &PipelineConfig::Offline {
+                    detector: OfflineDetectorConfig::SegNeigh(scaled),
+                    cost,
+                    constraints: constraints.clone(),
+                },
+            )))
+        }
+    }
+}
+
+fn model_default_params_per_segment(cost: OfflineCostKind) -> usize {
+    match cost {
+        OfflineCostKind::Ar => CostAR::new(1, ReproMode::Balanced).penalty_params_per_segment(),
+        OfflineCostKind::Cosine => {
+            CostCosine::new(ReproMode::Balanced).penalty_params_per_segment()
+        }
+        OfflineCostKind::L1Median => {
+            CostL1Median::new(ReproMode::Balanced).penalty_params_per_segment()
+        }
+        OfflineCostKind::L2 => CostL2Mean::new(ReproMode::Balanced).penalty_params_per_segment(),
+        OfflineCostKind::Normal => {
+            CostNormalMeanVar::new(ReproMode::Balanced).penalty_params_per_segment()
+        }
+        OfflineCostKind::NormalFullCov => {
+            CostNormalFullCov::new(ReproMode::Balanced).penalty_params_per_segment()
+        }
+        OfflineCostKind::Nig => {
+            CostNIGMarginal::new(ReproMode::Balanced).penalty_params_per_segment()
+        }
+        OfflineCostKind::Rank => CostRank::new(ReproMode::Balanced).penalty_params_per_segment(),
     }
 }
 
@@ -3184,6 +3249,12 @@ fn resource_estimate(pipeline: &PipelineConfig) -> ResourceEstimate {
                     relative_time_score: 0.65,
                     relative_memory_score: 0.55,
                 },
+                OfflineDetectorConfig::SegNeigh(_) => ResourceEstimate {
+                    time_complexity: "O(k*n^2)".to_string(),
+                    memory_complexity: "O(k*n + n)".to_string(),
+                    relative_time_score: 0.92,
+                    relative_memory_score: 0.78,
+                },
             }
         }
         PipelineConfig::Online { detector } => match detector {
@@ -3260,6 +3331,18 @@ fn pipeline_label(pipeline: &PipelineConfig) -> &'static str {
             }
             (OfflineDetectorConfig::Wbs(_), OfflineCostKind::Nig) => "WBS + NIG",
             (OfflineDetectorConfig::Wbs(_), OfflineCostKind::Rank) => "WBS + Rank",
+            (OfflineDetectorConfig::SegNeigh(_), OfflineCostKind::Ar) => "SegNeigh + AR",
+            (OfflineDetectorConfig::SegNeigh(_), OfflineCostKind::Cosine) => "SegNeigh + Cosine",
+            (OfflineDetectorConfig::SegNeigh(_), OfflineCostKind::L1Median) => {
+                "SegNeigh + L1 median"
+            }
+            (OfflineDetectorConfig::SegNeigh(_), OfflineCostKind::L2) => "SegNeigh + L2",
+            (OfflineDetectorConfig::SegNeigh(_), OfflineCostKind::Normal) => "SegNeigh + Normal",
+            (OfflineDetectorConfig::SegNeigh(_), OfflineCostKind::NormalFullCov) => {
+                "SegNeigh + Normal (full covariance)"
+            }
+            (OfflineDetectorConfig::SegNeigh(_), OfflineCostKind::Nig) => "SegNeigh + NIG",
+            (OfflineDetectorConfig::SegNeigh(_), OfflineCostKind::Rank) => "SegNeigh + Rank",
         },
         PipelineConfig::Online { detector } => match detector {
             OnlineDetectorConfig::Bocpd(config) => match config.observation {
@@ -3456,6 +3539,7 @@ fn pipeline_id(pipeline: &PipelineConfig) -> String {
                 OfflineDetectorConfig::BinSeg(_) => "binseg",
                 OfflineDetectorConfig::Fpop(_) => "fpop",
                 OfflineDetectorConfig::Wbs(_) => "wbs",
+                OfflineDetectorConfig::SegNeigh(_) => "segneigh",
             };
             let cost_name = match cost {
                 OfflineCostKind::Ar => "ar",
@@ -3598,6 +3682,7 @@ mod tests {
                     OfflineDetectorConfig::BinSeg(_) => "binseg",
                     OfflineDetectorConfig::Fpop(_) => "fpop",
                     OfflineDetectorConfig::Wbs(_) => "wbs",
+                    OfflineDetectorConfig::SegNeigh(_) => "segneigh",
                 });
                 costs.insert(match cost {
                     OfflineCostKind::Ar => "ar",
@@ -4780,6 +4865,45 @@ mod tests {
         assert_eq!(first.breakpoints, second.breakpoints);
         assert_eq!(first.diagnostics.algorithm, second.diagnostics.algorithm);
         assert_eq!(first.diagnostics.cost_model, second.diagnostics.cost_model);
+    }
+
+    #[cfg(feature = "serde")]
+    #[test]
+    fn pipeline_spec_roundtrip_serde_preserves_segneigh() {
+        let values = vec![
+            0.0, 0.0, 0.0, 0.0, 6.0, 6.0, 6.0, 6.0, -2.0, -2.0, -2.0, -2.0,
+        ];
+        let view = make_univariate_view(&values);
+        let stopping = Stopping::KnownK(2);
+        let pipeline = PipelineSpec {
+            detector: DetectorConfig::Offline(OfflineDetectorConfig::SegNeigh(
+                cpd_offline::DynpConfig {
+                    stopping: stopping.clone(),
+                    cancel_check_every: 16,
+                },
+            )),
+            cost: CostConfig::L2,
+            preprocess: None,
+            constraints: Constraints {
+                min_segment_len: 2,
+                ..Constraints::default()
+            },
+            stopping: Some(stopping),
+            seed: None,
+        };
+
+        let first = super::execute_pipeline(&view, &pipeline).expect("first run should succeed");
+        let encoded = serde_json::to_vec(&pipeline).expect("pipeline should serialize");
+        let decoded: PipelineSpec =
+            serde_json::from_slice(&encoded).expect("pipeline should decode");
+        let second = super::execute_pipeline(&view, &decoded).expect("second run should succeed");
+
+        assert!(matches!(
+            decoded.detector,
+            DetectorConfig::Offline(OfflineDetectorConfig::SegNeigh(_))
+        ));
+        assert_eq!(first.breakpoints, second.breakpoints);
+        assert_eq!(first.diagnostics.algorithm, "dynp");
     }
 
     #[test]

@@ -12,7 +12,9 @@ use cpd_doctor::{
     recommend,
 };
 use cpd_eval::{offline_metrics, online_metrics};
-use cpd_offline::{BinSegConfig, FpopConfig, PeltConfig, WbsConfig, WbsIntervalStrategy};
+use cpd_offline::{
+    BinSegConfig, FpopConfig, PeltConfig, SegNeighConfig, WbsConfig, WbsIntervalStrategy,
+};
 use serde::Serialize;
 use serde_json::{Map, Value};
 use std::env;
@@ -125,6 +127,7 @@ enum AlgorithmArg {
     Pelt,
     Binseg,
     Fpop,
+    SegNeigh,
     Wbs,
 }
 
@@ -161,9 +164,10 @@ impl AlgorithmArg {
             "pelt" => Ok(Self::Pelt),
             "binseg" => Ok(Self::Binseg),
             "fpop" => Ok(Self::Fpop),
+            "segneigh" | "seg_neigh" | "dynp" => Ok(Self::SegNeigh),
             "wbs" => Ok(Self::Wbs),
             _ => Err(CliError::invalid_input(format!(
-                "invalid --algorithm '{raw}'; expected one of: pelt, binseg, fpop, wbs"
+                "invalid --algorithm '{raw}'; expected one of: pelt, binseg, fpop, segneigh, wbs"
             ))),
         }
     }
@@ -846,7 +850,7 @@ fn print_command_help(command: &str) -> Result<(), CliError> {
     match command {
         "detect" => {
             println!(
-                "USAGE:\n  cpd detect --input <path> [OPTIONS]\n\nOPTIONS:\n  --algorithm <pelt|binseg|fpop|wbs>                                   Default: pelt\n  --cost <ar|cosine|l1_median|l2|normal|normal_full_cov|nig|rank>      Default: l2\n  --penalty <bic|aic|manual>                                            Default: bic\n  --penalty-value <float>                                               Required when --penalty=manual\n  --k <usize>                                                           Use KnownK stopping\n  --seed <u64>                                                          WBS seed only\n  --min-segment-len <usize>\n  --max-change-points <usize>\n  --max-depth <usize>\n  --jump <usize>\n  --input <path>                                                        Required (.csv or .npy)\n  --output <path>                                                       Write JSON output to file"
+                "USAGE:\n  cpd detect --input <path> [OPTIONS]\n\nOPTIONS:\n  --algorithm <pelt|binseg|fpop|segneigh|wbs>                          Default: pelt\n  --cost <ar|cosine|l1_median|l2|normal|normal_full_cov|nig|rank>      Default: l2\n  --penalty <bic|aic|manual>                                            Default: bic\n  --penalty-value <float>                                               Required when --penalty=manual\n  --k <usize>                                                           Use KnownK stopping\n  --seed <u64>                                                          WBS seed only\n  --min-segment-len <usize>\n  --max-change-points <usize>\n  --max-depth <usize>\n  --jump <usize>\n  --input <path>                                                        Required (.csv or .npy)\n  --output <path>                                                       Write JSON output to file"
             );
             Ok(())
         }
@@ -1051,6 +1055,17 @@ fn build_detect_pipeline(args: &DetectArgs) -> Result<PipelineSpec, CliError> {
             OfflineDetectorConfig::Fpop(FpopConfig {
                 stopping: stopping.clone(),
                 ..FpopConfig::default()
+            })
+        }
+        AlgorithmArg::SegNeigh => {
+            if args.seed.is_some() {
+                return Err(CliError::invalid_input(
+                    "--seed is only supported when --algorithm=wbs",
+                ));
+            }
+            OfflineDetectorConfig::SegNeigh(SegNeighConfig {
+                stopping: stopping.clone(),
+                ..SegNeighConfig::default()
             })
         }
         AlgorithmArg::Wbs => {
@@ -1738,6 +1753,13 @@ fn parse_detector_kind(
             };
             Ok(OfflineDetectorConfig::Fpop(config))
         }
+        "segneigh" | "seg_neigh" | "dynp" => {
+            let config = match config_dict {
+                Some(dict) => parse_segneigh_config(dict, context)?,
+                None => SegNeighConfig::default(),
+            };
+            Ok(OfflineDetectorConfig::SegNeigh(config))
+        }
         "wbs" => {
             let config = match config_dict {
                 Some(dict) => parse_wbs_config(dict, context)?,
@@ -1746,7 +1768,7 @@ fn parse_detector_kind(
             Ok(OfflineDetectorConfig::Wbs(config))
         }
         _ => Err(CliError::invalid_input(format!(
-            "unsupported {context} kind '{kind}'; expected one of: 'pelt', 'binseg', 'fpop', 'wbs'"
+            "unsupported {context} kind '{kind}'; expected one of: 'pelt', 'binseg', 'fpop', 'segneigh', 'wbs'"
         ))),
     }
 }
@@ -1816,6 +1838,29 @@ fn parse_fpop_config(dict: &Map<String, Value>, context: &str) -> Result<FpopCon
             _ => {
                 return Err(CliError::invalid_input(format!(
                     "unsupported key '{key}' in {context} for detector kind='fpop'"
+                )));
+            }
+        }
+    }
+    Ok(config)
+}
+
+fn parse_segneigh_config(
+    dict: &Map<String, Value>,
+    context: &str,
+) -> Result<SegNeighConfig, CliError> {
+    let mut config = SegNeighConfig::default();
+    for (key, value) in dict {
+        match key.as_str() {
+            "kind" => {}
+            "stopping" => config.stopping = parse_pipeline_stopping_compat(value)?,
+            "cancel_check_every" => {
+                config.cancel_check_every =
+                    parse_usize(value, "pipeline.detector.cancel_check_every")?
+            }
+            _ => {
+                return Err(CliError::invalid_input(format!(
+                    "unsupported key '{key}' in {context} for detector kind='segneigh'"
                 )));
             }
         }
@@ -2126,6 +2171,7 @@ fn detector_stopping(detector: &OfflineDetectorConfig) -> Stopping {
         OfflineDetectorConfig::BinSeg(config) => config.stopping.clone(),
         OfflineDetectorConfig::Fpop(config) => config.stopping.clone(),
         OfflineDetectorConfig::Wbs(config) => config.stopping.clone(),
+        OfflineDetectorConfig::SegNeigh(config) => config.stopping.clone(),
     }
 }
 
@@ -2134,7 +2180,8 @@ fn detector_seed(detector: &OfflineDetectorConfig) -> Option<u64> {
         OfflineDetectorConfig::Wbs(config) => Some(config.seed),
         OfflineDetectorConfig::Pelt(_)
         | OfflineDetectorConfig::BinSeg(_)
-        | OfflineDetectorConfig::Fpop(_) => None,
+        | OfflineDetectorConfig::Fpop(_)
+        | OfflineDetectorConfig::SegNeigh(_) => None,
     }
 }
 
@@ -2172,6 +2219,14 @@ fn apply_pipeline_controls(
             config.stopping = stopping.clone();
             if let Some(seed_value) = seed {
                 config.seed = seed_value;
+            }
+        }
+        OfflineDetectorConfig::SegNeigh(config) => {
+            config.stopping = stopping.clone();
+            if seed.is_some() {
+                return Err(CliError::invalid_input(
+                    "pipeline.seed is only supported for detector='wbs'",
+                ));
             }
         }
     }
@@ -2548,6 +2603,27 @@ mod tests {
             DetectorConfig::Offline(OfflineDetectorConfig::Fpop(_))
         ));
         assert!(matches!(pipeline.cost, CostConfig::L2));
+    }
+
+    #[test]
+    fn detect_pipeline_supports_segneigh_algorithm() {
+        let tokens = vec![
+            "--input".to_string(),
+            "/tmp/series.csv".to_string(),
+            "--algorithm".to_string(),
+            "segneigh".to_string(),
+            "--cost".to_string(),
+            "normal".to_string(),
+            "--k".to_string(),
+            "2".to_string(),
+        ];
+        let args = parse_detect_args(tokens.as_slice()).expect("detect args should parse");
+        let pipeline = build_detect_pipeline(&args).expect("segneigh pipeline should build");
+        assert!(matches!(
+            pipeline.detector,
+            DetectorConfig::Offline(OfflineDetectorConfig::SegNeigh(_))
+        ));
+        assert!(matches!(pipeline.cost, CostConfig::Normal));
     }
 
     #[test]

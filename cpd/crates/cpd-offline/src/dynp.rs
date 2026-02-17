@@ -10,6 +10,7 @@ use cpd_core::{
 };
 use cpd_costs::CostModel;
 use std::borrow::Cow;
+use std::mem::size_of;
 use std::time::Instant;
 
 const DEFAULT_CANCEL_CHECK_EVERY: usize = 1000;
@@ -143,6 +144,61 @@ fn checked_counter_increment(counter: &mut usize, name: &str) -> Result<(), CpdE
     Ok(())
 }
 
+fn checked_usize_mul(lhs: usize, rhs: usize, context: &str) -> Result<usize, CpdError> {
+    lhs.checked_mul(rhs)
+        .ok_or_else(|| CpdError::resource_limit(format!("{context} overflow")))
+}
+
+fn checked_usize_add(lhs: usize, rhs: usize, context: &str) -> Result<usize, CpdError> {
+    lhs.checked_add(rhs)
+        .ok_or_else(|| CpdError::resource_limit(format!("{context} overflow")))
+}
+
+fn estimate_dynp_sweep_state_bytes(
+    endpoints_len: usize,
+    segments: usize,
+) -> Result<usize, CpdError> {
+    let backpointer_rows = checked_usize_add(segments, 1, "dynp backpointer row count")?;
+    let backpointer_cells = checked_usize_mul(
+        backpointer_rows,
+        endpoints_len,
+        "dynp backpointer cell count",
+    )?;
+    let backpointer_bytes = checked_usize_mul(
+        backpointer_cells,
+        size_of::<usize>(),
+        "dynp backpointer bytes",
+    )?;
+
+    let objective_entries = checked_usize_add(segments, 1, "dynp objective entry count")?;
+    let objective_bytes =
+        checked_usize_mul(objective_entries, size_of::<f64>(), "dynp objective bytes")?;
+
+    let dp_entries = checked_usize_mul(endpoints_len, 2, "dynp dp entry count")?;
+    let dp_bytes = checked_usize_mul(dp_entries, size_of::<f64>(), "dynp dp bytes")?;
+
+    let endpoint_bytes =
+        checked_usize_mul(endpoints_len, size_of::<usize>(), "dynp endpoint bytes")?;
+
+    let base = checked_usize_add(backpointer_bytes, objective_bytes, "dynp state bytes")?;
+    let base = checked_usize_add(base, dp_bytes, "dynp state bytes")?;
+    checked_usize_add(base, endpoint_bytes, "dynp state bytes")
+}
+
+fn enforce_memory_budget(
+    validated: &ValidatedConstraints,
+    required_bytes: usize,
+) -> Result<(), CpdError> {
+    if let Some(limit_bytes) = validated.memory_budget_bytes
+        && required_bytes > limit_bytes
+    {
+        return Err(CpdError::resource_limit(format!(
+            "constraints.memory_budget_bytes exceeded for dynp state: required_bytes={required_bytes}, limit_bytes={limit_bytes}; increase constraints.memory_budget_bytes, reduce constraints.max_change_points, or increase constraints.jump"
+        )));
+    }
+    Ok(())
+}
+
 fn evaluate_segment_cost<C: CostModel>(
     model: &C,
     cache: &C::Cache,
@@ -221,6 +277,8 @@ fn run_dynp_sweep<C: CostModel>(
         .checked_add(1)
         .ok_or_else(|| CpdError::resource_limit("segments overflow"))?;
     let endpoints = build_endpoints(validated, x.n);
+    let estimated_state_bytes = estimate_dynp_sweep_state_bytes(endpoints.len(), segments)?;
+    enforce_memory_budget(validated, estimated_state_bytes)?;
     let target_idx = endpoints.len().saturating_sub(1);
     let inf = f64::INFINITY;
     let mut backpointers = vec![vec![usize::MAX; endpoints.len()]; segments + 1];
@@ -250,6 +308,9 @@ fn run_dynp_sweep<C: CostModel>(
             let mut best_prev_idx = usize::MAX;
 
             for start_idx in 0..end_idx {
+                checked_counter_increment(&mut iteration, "iteration")?;
+                check_runtime_controls(iteration, cancel_check_every, ctx, started_at, runtime)?;
+
                 let start = endpoints[start_idx];
                 let segment_len = end.saturating_sub(start);
                 if segment_len < validated.min_segment_len {
@@ -711,8 +772,8 @@ mod tests {
     use super::{Dynp, DynpConfig};
     use crate::{Pelt, PeltConfig};
     use cpd_core::{
-        Constraints, CpdError, DTypeView, ExecutionContext, MemoryLayout, MissingPolicy,
-        OfflineDetector, Penalty, ReproMode, Stopping, TimeIndex, TimeSeriesView,
+        BudgetMode, CancelToken, Constraints, CpdError, DTypeView, ExecutionContext, MemoryLayout,
+        MissingPolicy, OfflineDetector, Penalty, ReproMode, Stopping, TimeIndex, TimeSeriesView,
     };
     use cpd_costs::{CostL2Mean, CostNormalMeanVar};
 
@@ -1127,5 +1188,185 @@ mod tests {
                 .iter()
                 .any(|note| note.contains("penalty_path[1]:"))
         );
+    }
+
+    #[test]
+    fn cancellation_mid_run_returns_cancelled() {
+        let detector = Dynp::new(
+            CostL2Mean::default(),
+            DynpConfig {
+                stopping: Stopping::KnownK(2),
+                cancel_check_every: 1,
+            },
+        )
+        .expect("config should be valid");
+
+        let values = vec![
+            0.0, 0.0, 0.0, 0.0, 10.0, 10.0, 10.0, 10.0, -4.0, -4.0, -4.0, -4.0,
+        ];
+        let view = make_f64_view(
+            &values,
+            values.len(),
+            1,
+            MemoryLayout::CContiguous,
+            MissingPolicy::Error,
+        );
+        let constraints = constraints_with_min_segment_len(2);
+        let cancel = CancelToken::new();
+        cancel.cancel();
+        let ctx = ExecutionContext::new(&constraints).with_cancel(&cancel);
+
+        let err = detector
+            .detect(&view, &ctx)
+            .expect_err("cancelled token must stop detect");
+        assert_eq!(err.to_string(), "cancelled");
+    }
+
+    #[test]
+    fn cost_eval_budget_exceeded_hard_fail() {
+        let detector = Dynp::new(
+            CostL2Mean::default(),
+            DynpConfig {
+                stopping: Stopping::KnownK(2),
+                cancel_check_every: 1,
+            },
+        )
+        .expect("config should be valid");
+
+        let values = vec![
+            0.0, 0.0, 0.0, 0.0, 10.0, 10.0, 10.0, 10.0, -4.0, -4.0, -4.0, -4.0,
+        ];
+        let view = make_f64_view(
+            &values,
+            values.len(),
+            1,
+            MemoryLayout::CContiguous,
+            MissingPolicy::Error,
+        );
+        let constraints = Constraints {
+            min_segment_len: 2,
+            max_cost_evals: Some(1),
+            ..Constraints::default()
+        };
+        let ctx = ExecutionContext::new(&constraints).with_budget_mode(BudgetMode::HardFail);
+
+        let err = detector
+            .detect(&view, &ctx)
+            .expect_err("hard budget should fail");
+        assert!(err.to_string().contains("max_cost_evals"));
+    }
+
+    #[test]
+    fn time_budget_exceeded_hard_fail() {
+        let detector = Dynp::new(
+            CostL2Mean::default(),
+            DynpConfig {
+                stopping: Stopping::KnownK(8),
+                cancel_check_every: 1,
+            },
+        )
+        .expect("config should be valid");
+
+        let mut values = vec![0.0; 4_096];
+        for item in values.iter_mut().take(2_048).skip(1_024) {
+            *item = 5.0;
+        }
+        for item in values.iter_mut().skip(2_048) {
+            *item = -3.0;
+        }
+        let view = make_f64_view(
+            &values,
+            values.len(),
+            1,
+            MemoryLayout::CContiguous,
+            MissingPolicy::Error,
+        );
+        let constraints = Constraints {
+            min_segment_len: 2,
+            time_budget_ms: Some(1),
+            ..Constraints::default()
+        };
+        let ctx = ExecutionContext::new(&constraints).with_budget_mode(BudgetMode::HardFail);
+
+        let err = detector
+            .detect(&view, &ctx)
+            .expect_err("hard time budget should fail");
+        assert!(err.to_string().contains("time_budget_ms"));
+    }
+
+    #[test]
+    fn diagnostics_include_soft_budget_warning() {
+        let detector = Dynp::new(
+            CostL2Mean::default(),
+            DynpConfig {
+                stopping: Stopping::KnownK(2),
+                cancel_check_every: 1,
+            },
+        )
+        .expect("config should be valid");
+
+        let values = vec![
+            0.0, 0.0, 0.0, 0.0, 10.0, 10.0, 10.0, 10.0, -4.0, -4.0, -4.0, -4.0,
+        ];
+        let view = make_f64_view(
+            &values,
+            values.len(),
+            1,
+            MemoryLayout::CContiguous,
+            MissingPolicy::Error,
+        );
+        let constraints = Constraints {
+            min_segment_len: 2,
+            max_cost_evals: Some(1),
+            ..Constraints::default()
+        };
+        let ctx = ExecutionContext::new(&constraints).with_budget_mode(BudgetMode::SoftDegrade);
+
+        let result = detector
+            .detect(&view, &ctx)
+            .expect("soft budget mode should still return a result");
+        assert!(
+            result
+                .diagnostics
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("SoftDegrade"))
+        );
+    }
+
+    #[test]
+    fn memory_budget_exceeded_returns_resource_limit() {
+        let detector = Dynp::new(
+            CostL2Mean::default(),
+            DynpConfig {
+                stopping: Stopping::KnownK(2),
+                cancel_check_every: 1,
+            },
+        )
+        .expect("config should be valid");
+
+        let values = vec![
+            0.0, 0.0, 0.0, 0.0, 10.0, 10.0, 10.0, 10.0, -4.0, -4.0, -4.0, -4.0,
+        ];
+        let view = make_f64_view(
+            &values,
+            values.len(),
+            1,
+            MemoryLayout::CContiguous,
+            MissingPolicy::Error,
+        );
+        let constraints = Constraints {
+            min_segment_len: 2,
+            memory_budget_bytes: Some(64),
+            ..Constraints::default()
+        };
+        let ctx = ExecutionContext::new(&constraints);
+
+        let err = detector
+            .detect(&view, &ctx)
+            .expect_err("insufficient memory budget should fail");
+        let message = err.to_string();
+        assert!(message.contains("memory_budget_bytes"));
+        assert!(message.contains("required_bytes"));
     }
 }

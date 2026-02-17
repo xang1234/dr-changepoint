@@ -22,6 +22,11 @@ pub use schema_migration::{BinSegConfigWire, PeltConfigWire, WbsConfigWire};
 pub use wbs::{Wbs, WbsConfig, WbsIntervalStrategy};
 pub use window::{SlidingWindow, SlidingWindowConfig};
 
+/// Segment Neighborhood detector alias (backed by [`Dynp`]).
+pub type SegNeigh<C> = Dynp<C>;
+/// Segment Neighborhood detector config alias (backed by [`DynpConfig`]).
+pub type SegNeighConfig = DynpConfig;
+
 /// Offline detector namespace placeholder.
 pub fn crate_name() -> &'static str {
     let _ = (cpd_core::crate_name(), cpd_costs::crate_name());
