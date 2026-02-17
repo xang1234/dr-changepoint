@@ -18,6 +18,8 @@ use pyo3::exceptions::{PyImportError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyAnyMethods, PyDict, PyModule};
 #[cfg(feature = "serde")]
+use serde_json::{Map as JsonMap, Value as JsonValue};
+#[cfg(feature = "serde")]
 use std::borrow::Cow;
 
 fn repro_mode_to_str(mode: ReproMode) -> &'static str {
@@ -510,6 +512,10 @@ pub struct PyOfflineChangePointResult {
     scores: Option<Vec<f64>>,
     segments: Option<Vec<PySegmentStats>>,
     diagnostics: PyDiagnostics,
+    #[cfg(feature = "serde")]
+    result_unknown_fields: JsonMap<String, JsonValue>,
+    #[cfg(feature = "serde")]
+    diagnostics_unknown_fields: JsonMap<String, JsonValue>,
 }
 
 #[pymethods]
@@ -550,7 +556,12 @@ impl PyOfflineChangePointResult {
     #[cfg(feature = "serde")]
     fn to_json(&self) -> PyResult<String> {
         let core = self.to_core()?;
-        serde_json::to_string(&core)
+        let wire = OfflineChangePointResultWire::from_runtime_with_unknown(
+            core,
+            self.result_unknown_fields.clone(),
+            self.diagnostics_unknown_fields.clone(),
+        );
+        serde_json::to_string(&wire)
             .map_err(|err| PyValueError::new_err(format!("failed to serialize result: {err}")))
     }
 
@@ -575,8 +586,12 @@ impl PyOfflineChangePointResult {
                 "invalid OfflineChangePointResult JSON payload: {err}"
             ))
         })?;
-        let core = wire.to_runtime().map_err(cpd_error_to_pyerr)?;
-        Ok(Self::from(core))
+        let (core, result_unknown_fields, diagnostics_unknown_fields) =
+            wire.into_runtime_parts().map_err(cpd_error_to_pyerr)?;
+        let mut parsed = Self::from(core);
+        parsed.result_unknown_fields = result_unknown_fields;
+        parsed.diagnostics_unknown_fields = diagnostics_unknown_fields;
+        Ok(parsed)
     }
 
     #[cfg(not(feature = "serde"))]
@@ -634,48 +649,61 @@ impl PyOfflineChangePointResult {
                     vec![series]
                 }
                 2 => {
-                    let rows: Vec<Vec<f64>> = array.extract().map_err(|_| {
-                        PyTypeError::new_err(
-                            "plot() values must be numeric and convertible to a 2D float array",
+                    let shape: Vec<usize> = array.getattr("shape")?.extract()?;
+                    let rows_len = *shape.first().ok_or_else(|| {
+                        PyValueError::new_err("plot() could not determine rows from 2D input shape")
+                    })?;
+                    let dims = *shape.get(1).ok_or_else(|| {
+                        PyValueError::new_err(
+                            "plot() could not determine dimensions from 2D input shape",
                         )
                     })?;
-                    if rows.is_empty() {
-                        return Err(PyValueError::new_err(
-                            "plot() values must contain at least one row",
-                        ));
-                    }
-                    if rows.len() != diagnostics_n {
+                    if rows_len != diagnostics_n {
                         return Err(PyValueError::new_err(format!(
                             "plot() values rows must equal diagnostics.n; got rows={}, diagnostics.n={diagnostics_n}",
-                            rows.len()
+                            rows_len
                         )));
                     }
-                    let dims = rows[0].len();
                     if dims == 0 {
                         return Err(PyValueError::new_err(
                             "plot() values must contain at least one column",
                         ));
-                    }
-                    for (row_idx, row) in rows.iter().enumerate() {
-                        if row.len() != dims {
-                            return Err(PyValueError::new_err(format!(
-                                "plot() values row {row_idx} has length {}, expected {dims}",
-                                row.len()
-                            )));
-                        }
                     }
                     if diagnostics_d > 0 && dims != diagnostics_d {
                         return Err(PyValueError::new_err(format!(
                             "plot() values column count must equal diagnostics.d; got dims={dims}, diagnostics.d={diagnostics_d}"
                         )));
                     }
-                    let mut by_dim = vec![Vec::with_capacity(rows.len()); dims];
-                    for row in rows {
-                        for (dim, value) in row.into_iter().enumerate() {
-                            by_dim[dim].push(value);
-                        }
+                    let rows: Vec<Vec<f64>> = array.extract().map_err(|_| {
+                        PyTypeError::new_err(
+                            "plot() values must be numeric and convertible to a 2D float array",
+                        )
+                    })?;
+                    if rows.len() != rows_len {
+                        return Err(PyValueError::new_err(format!(
+                            "plot() values rows do not match input shape; got rows={}, shape_rows={rows_len}",
+                            rows.len()
+                        )));
                     }
-                    by_dim
+                    if rows_len == 0 {
+                        vec![Vec::new(); dims]
+                    } else {
+                        for (row_idx, row) in rows.iter().enumerate() {
+                            if row.len() != dims {
+                                return Err(PyValueError::new_err(format!(
+                                    "plot() values row {row_idx} has length {}, expected {dims}",
+                                    row.len()
+                                )));
+                            }
+                        }
+                        let mut by_dim = vec![Vec::with_capacity(rows.len()); dims];
+                        for row in rows {
+                            for (dim, value) in row.into_iter().enumerate() {
+                                by_dim[dim].push(value);
+                            }
+                        }
+                        by_dim
+                    }
                 }
                 _ => Err(PyValueError::new_err(format!(
                     "plot() expects 1D or 2D input values; got ndim={ndim}"
@@ -808,6 +836,10 @@ impl From<CoreOfflineChangePointResult> for PyOfflineChangePointResult {
                 .segments
                 .map(|segments| segments.into_iter().map(Into::into).collect()),
             diagnostics,
+            #[cfg(feature = "serde")]
+            result_unknown_fields: JsonMap::new(),
+            #[cfg(feature = "serde")]
+            diagnostics_unknown_fields: JsonMap::new(),
         }
     }
 }
@@ -842,6 +874,7 @@ mod tests {
     };
     #[cfg(not(feature = "serde"))]
     use pyo3::exceptions::PyNotImplementedError;
+    #[cfg(feature = "serde")]
     use pyo3::exceptions::PyValueError;
     use pyo3::prelude::*;
     use pyo3::types::{PyAnyMethods, PyDict, PyList};
@@ -854,6 +887,9 @@ mod tests {
     #[cfg(feature = "serde")]
     const OFFLINE_RESULT_FIXTURE_JSON: &str =
         include_str!("../tests/fixtures/offline_result_v1.json");
+    #[cfg(feature = "serde")]
+    const OFFLINE_RESULT_V2_ADDITIVE_FIXTURE_JSON: &str =
+        include_str!("../../../tests/fixtures/migrations/result/offline_result.v2.additive.json");
 
     fn with_python<F, R>(f: F) -> R
     where
@@ -987,6 +1023,38 @@ mod tests {
                     missing_count: 0,
                 },
             ]),
+            diagnostics,
+        }
+    }
+
+    fn sample_empty_univariate_result() -> CoreOfflineChangePointResult {
+        let diagnostics = CoreDiagnostics {
+            n: 0,
+            d: 1,
+            schema_version: DIAGNOSTICS_SCHEMA_VERSION,
+            engine_version: Some("test-engine".to_string()),
+            runtime_ms: Some(0),
+            notes: vec!["empty".to_string()],
+            warnings: vec![],
+            algorithm: Cow::Owned("pelt".to_string()),
+            cost_model: Cow::Owned("l2".to_string()),
+            seed: None,
+            repro_mode: ReproMode::Balanced,
+            thread_count: None,
+            blas_backend: None,
+            cpu_features: None,
+            #[cfg(feature = "serde")]
+            params_json: None,
+            pruning_stats: None,
+            missing_policy_applied: None,
+            missing_fraction: None,
+            effective_sample_count: Some(0),
+        };
+        CoreOfflineChangePointResult {
+            breakpoints: vec![],
+            change_points: vec![],
+            scores: Some(vec![]),
+            segments: Some(vec![]),
             diagnostics,
         }
     }
@@ -1460,6 +1528,45 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "serde")]
+    fn from_json_to_json_roundtrip_preserves_additive_unknown_fields() {
+        with_python(|py| {
+            let py_result = Py::new(py, PyOfflineChangePointResult::from(sample_core_result()))
+                .expect("result object should be constructible");
+            let result_type = py_result
+                .bind(py)
+                .getattr("__class__")
+                .expect("result class should be available");
+
+            let parsed = result_type
+                .call_method1("from_json", (OFFLINE_RESULT_V2_ADDITIVE_FIXTURE_JSON,))
+                .expect("from_json should accept additive v2 fixture");
+            let reserialized: String = parsed
+                .call_method0("to_json")
+                .expect("to_json should succeed")
+                .extract()
+                .expect("to_json should return a JSON string");
+
+            let payload: Value =
+                serde_json::from_str(&reserialized).expect("payload should parse as JSON");
+            let result_flag = payload
+                .get("future_result_flag")
+                .and_then(Value::as_str)
+                .expect("result unknown field should roundtrip");
+            let diag_source = payload
+                .get("diagnostics")
+                .and_then(Value::as_object)
+                .and_then(|diagnostics| diagnostics.get("future_diagnostics_flag"))
+                .and_then(Value::as_object)
+                .and_then(|extra| extra.get("source"))
+                .and_then(Value::as_str)
+                .expect("diagnostics unknown field should roundtrip");
+            assert_eq!(result_flag, "additive-v2");
+            assert_eq!(diag_source, "v2");
+        });
+    }
+
+    #[test]
     fn plot_reports_missing_matplotlib_with_clear_error() {
         with_python(|py| {
             let py_result = Py::new(
@@ -1569,29 +1676,126 @@ pyplot = types.ModuleType("matplotlib.pyplot")
 pyplot.subplots = _subplots
 matplotlib = types.ModuleType("matplotlib")
 matplotlib.pyplot = pyplot
+_prev_matplotlib = sys.modules.get("matplotlib")
+_prev_pyplot = sys.modules.get("matplotlib.pyplot")
 sys.modules["matplotlib"] = matplotlib
 sys.modules["matplotlib.pyplot"] = pyplot
 
-uni_fig = univariate.plot(values=np.linspace(0.0, 1.0, 100), title="univariate")
-assert len(uni_fig.axes) == 1
-assert len(uni_fig.axes[0].lines) == 1
-assert [x for x, _ in uni_fig.axes[0].vlines] == [50]
-assert uni_fig.axes[0].title == "univariate"
-assert uni_fig.tight_layout_calls == 1
+try:
+    uni_fig = univariate.plot(values=np.linspace(0.0, 1.0, 100), title="univariate")
+    assert len(uni_fig.axes) == 1
+    assert len(uni_fig.axes[0].lines) == 1
+    assert [x for x, _ in uni_fig.axes[0].vlines] == [50]
+    assert uni_fig.axes[0].title == "univariate"
+    assert uni_fig.tight_layout_calls == 1
 
-multi_fig = multivariate.plot()
-assert len(multi_fig.axes) == 2
-assert all(len(axis.lines) == 1 for axis in multi_fig.axes)
-assert all([x for x, _ in axis.vlines] == [40] for axis in multi_fig.axes)
-assert multi_fig.axes[0].ylabel == "x[0]"
-assert multi_fig.axes[1].ylabel == "x[1]"
-assert multi_fig.axes[1].xlabel == "t"
-assert multi_fig.tight_layout_calls == 1
+    multi_fig = multivariate.plot()
+    assert len(multi_fig.axes) == 2
+    assert all(len(axis.lines) == 1 for axis in multi_fig.axes)
+    assert all([x for x, _ in axis.vlines] == [40] for axis in multi_fig.axes)
+    assert multi_fig.axes[0].ylabel == "x[0]"
+    assert multi_fig.axes[1].ylabel == "x[1]"
+    assert multi_fig.axes[1].xlabel == "t"
+    assert multi_fig.tight_layout_calls == 1
+finally:
+    if _prev_matplotlib is None:
+        sys.modules.pop("matplotlib", None)
+    else:
+        sys.modules["matplotlib"] = _prev_matplotlib
+    if _prev_pyplot is None:
+        sys.modules.pop("matplotlib.pyplot", None)
+    else:
+        sys.modules["matplotlib.pyplot"] = _prev_pyplot
 "#,
                 None,
                 Some(&locals),
             )
             .expect("fake backend should exercise plot paths");
+        });
+    }
+
+    #[test]
+    fn plot_accepts_empty_2d_values_when_diagnostics_n_is_zero() {
+        with_python(|py| {
+            let empty = Py::new(
+                py,
+                PyOfflineChangePointResult::from(sample_empty_univariate_result()),
+            )
+            .expect("empty result should be constructible");
+            let locals = PyDict::new(py);
+            locals
+                .set_item("empty_result", empty)
+                .expect("locals should accept empty result");
+
+            run_python(
+                py,
+                r#"
+import sys
+import types
+import numpy as np
+
+class _FakeAxis:
+    def __init__(self):
+        self.lines = []
+        self.vlines = []
+        self.figure = None
+    def plot(self, y, **kwargs):
+        self.lines.append((list(y), dict(kwargs)))
+    def axvline(self, x, **kwargs):
+        self.vlines.append((int(x), dict(kwargs)))
+    def set_title(self, *_args, **_kwargs):
+        pass
+    def set_ylabel(self, *_args, **_kwargs):
+        pass
+    def set_xlabel(self, *_args, **_kwargs):
+        pass
+    def legend(self, *_args, **_kwargs):
+        pass
+
+class _FakeFigure:
+    def __init__(self):
+        self.axes = []
+        self.tight_layout_calls = 0
+    def tight_layout(self):
+        self.tight_layout_calls += 1
+
+def _subplots(rows, cols=1, **_kwargs):
+    fig = _FakeFigure()
+    axes_grid = np.empty((rows, cols), dtype=object)
+    for r in range(rows):
+        for c in range(cols):
+            axis = _FakeAxis()
+            axis.figure = fig
+            axes_grid[r, c] = axis
+            fig.axes.append(axis)
+    return fig, axes_grid
+
+pyplot = types.ModuleType("matplotlib.pyplot")
+pyplot.subplots = _subplots
+matplotlib = types.ModuleType("matplotlib")
+matplotlib.pyplot = pyplot
+_prev_matplotlib = sys.modules.get("matplotlib")
+_prev_pyplot = sys.modules.get("matplotlib.pyplot")
+sys.modules["matplotlib"] = matplotlib
+sys.modules["matplotlib.pyplot"] = pyplot
+try:
+    fig = empty_result.plot(values=np.empty((0, 1), dtype=float))
+    assert len(fig.axes) == 1
+    assert fig.axes[0].lines[0][0] == []
+finally:
+    if _prev_matplotlib is None:
+        sys.modules.pop("matplotlib", None)
+    else:
+        sys.modules["matplotlib"] = _prev_matplotlib
+    if _prev_pyplot is None:
+        sys.modules.pop("matplotlib.pyplot", None)
+    else:
+        sys.modules["matplotlib.pyplot"] = _prev_pyplot
+"#,
+                None,
+                Some(&locals),
+            )
+            .expect("n=0 2D values should be accepted");
         });
     }
 
