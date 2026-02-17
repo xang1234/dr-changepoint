@@ -218,7 +218,7 @@ jobs:
   sign-sbom-attest:
     name: sign-sbom-attest
     needs: [build-wheels, build-sdist, build-crates]
-    if: ${{ needs['build-wheels'].result == 'success' && needs['build-sdist'].result == 'success' && (needs['build-crates'].result == 'success' || needs['build-crates'].result == 'skipped') }}
+    if: ${{ always() && needs['build-wheels'].result == 'success' && needs['build-sdist'].result == 'success' && (needs['build-crates'].result == 'success' || needs['build-crates'].result == 'skipped') }}
     runs-on: ubuntu-latest
     timeout-minutes: 45
     permissions:
