@@ -258,14 +258,10 @@ fn build_initial_breakpoints(
             .effective_candidates
             .partition_point(|&split| split < lower);
 
-        let mut next_split = None;
-        for &split in &validated.effective_candidates[start_idx..] {
-            if n.saturating_sub(split) < min_segment_len {
-                break;
-            }
-            next_split = Some(split);
-            break;
-        }
+        let next_split = validated.effective_candidates[start_idx..]
+            .iter()
+            .copied()
+            .find(|&split| n.saturating_sub(split) >= min_segment_len);
 
         let Some(split) = next_split else {
             break;
