@@ -2,6 +2,10 @@
 
 #![forbid(unsafe_code)]
 
+#[cfg(feature = "serde")]
+use crate::error_map::cpd_error_to_pyerr;
+#[cfg(feature = "serde")]
+use cpd_core::OfflineChangePointResultWire;
 use cpd_core::{
     DIAGNOSTICS_SCHEMA_VERSION, Diagnostics as CoreDiagnostics,
     OfflineChangePointResult as CoreOfflineChangePointResult,
@@ -10,11 +14,9 @@ use cpd_core::{
 };
 #[cfg(not(feature = "serde"))]
 use pyo3::exceptions::PyNotImplementedError;
-#[cfg(feature = "serde")]
-use pyo3::exceptions::PyValueError;
+use pyo3::exceptions::{PyImportError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
-#[cfg(feature = "serde")]
-use pyo3::types::{PyAnyMethods, PyModule};
+use pyo3::types::{PyAnyMethods, PyDict, PyModule};
 #[cfg(feature = "serde")]
 use std::borrow::Cow;
 
@@ -38,6 +40,54 @@ fn repro_mode_from_str(value: &str) -> ReproMode {
 
 fn derive_change_points(n: usize, breakpoints: &[usize]) -> Vec<usize> {
     breakpoints.iter().copied().filter(|&bp| bp < n).collect()
+}
+
+fn import_pyplot<'py>(py: Python<'py>) -> PyResult<Bound<'py, PyModule>> {
+    PyModule::import(py, "matplotlib.pyplot").map_err(|err| {
+        PyImportError::new_err(format!(
+            "plot() requires optional dependency 'matplotlib'. Install with: python -m pip install matplotlib ({err})"
+        ))
+    })
+}
+
+fn build_segment_mean_summary(
+    n: usize,
+    d: usize,
+    segments: &[PySegmentStats],
+) -> PyResult<Vec<Vec<f64>>> {
+    if d == 0 {
+        return Err(PyValueError::new_err(
+            "plot() could not infer dimensionality from diagnostics/segments",
+        ));
+    }
+
+    let mut summary = vec![vec![f64::NAN; n]; d];
+    for (idx, segment) in segments.iter().enumerate() {
+        if segment.end < segment.start {
+            return Err(PyValueError::new_err(format!(
+                "plot() cannot summarize segments[{idx}] with end < start"
+            )));
+        }
+        if segment.end > n {
+            return Err(PyValueError::new_err(format!(
+                "plot() cannot summarize segments[{idx}] with end={} beyond diagnostics.n={n}",
+                segment.end
+            )));
+        }
+
+        for dim in 0..d {
+            let value = segment
+                .mean
+                .as_ref()
+                .and_then(|mean| mean.get(dim))
+                .copied()
+                .unwrap_or(f64::NAN);
+            for slot in &mut summary[dim][segment.start..segment.end] {
+                *slot = value;
+            }
+        }
+    }
+    Ok(summary)
 }
 
 #[pyclass(module = "cpd._cpd_rs", name = "PruningStats", frozen)]
@@ -511,6 +561,224 @@ impl PyOfflineChangePointResult {
         ))
     }
 
+    #[cfg(feature = "serde")]
+    #[staticmethod]
+    fn from_json(payload: &str) -> PyResult<Self> {
+        if payload.trim().is_empty() {
+            return Err(PyValueError::new_err(
+                "from_json() requires a non-empty JSON string payload",
+            ));
+        }
+
+        let wire: OfflineChangePointResultWire = serde_json::from_str(payload).map_err(|err| {
+            PyValueError::new_err(format!(
+                "invalid OfflineChangePointResult JSON payload: {err}"
+            ))
+        })?;
+        let core = wire.to_runtime().map_err(cpd_error_to_pyerr)?;
+        Ok(Self::from(core))
+    }
+
+    #[cfg(not(feature = "serde"))]
+    #[staticmethod]
+    fn from_json(_payload: &str) -> PyResult<Self> {
+        Err(PyNotImplementedError::new_err(
+            "from_json() requires cpd-python built with serde feature",
+        ))
+    }
+
+    #[pyo3(signature = (values=None, *, ax=None, title=None, breakpoint_color="crimson", breakpoint_style="--", line_width=1.5, show_legend=true))]
+    fn plot(
+        &self,
+        py: Python<'_>,
+        values: Option<&Bound<'_, PyAny>>,
+        ax: Option<&Bound<'_, PyAny>>,
+        title: Option<&str>,
+        breakpoint_color: &str,
+        breakpoint_style: &str,
+        line_width: f64,
+        show_legend: bool,
+    ) -> PyResult<Py<PyAny>> {
+        if !line_width.is_finite() || line_width <= 0.0 {
+            return Err(PyValueError::new_err(
+                "plot() requires line_width to be a finite positive float",
+            ));
+        }
+
+        let pyplot = import_pyplot(py)?;
+        let diagnostics_n = self.diagnostics.n;
+        let diagnostics_d = self.diagnostics.d;
+
+        let series_by_dimension: Vec<Vec<f64>> = if let Some(raw_values) = values {
+            let numpy = PyModule::import(py, "numpy")?;
+            let array = numpy.call_method1("asarray", (raw_values,))?;
+            let ndim: usize = array.getattr("ndim")?.extract()?;
+            match ndim {
+                1 => {
+                    if diagnostics_d > 1 {
+                        return Err(PyValueError::new_err(format!(
+                            "plot() received univariate values, but diagnostics.d={diagnostics_d}; expected multivariate values with matching dimensions"
+                        )));
+                    }
+                    let series: Vec<f64> = array.extract().map_err(|_| {
+                        PyTypeError::new_err(
+                            "plot() values must be numeric and convertible to float",
+                        )
+                    })?;
+                    if series.len() != diagnostics_n {
+                        return Err(PyValueError::new_err(format!(
+                            "plot() values length must equal diagnostics.n; got values_len={}, diagnostics.n={diagnostics_n}",
+                            series.len()
+                        )));
+                    }
+                    vec![series]
+                }
+                2 => {
+                    let rows: Vec<Vec<f64>> = array.extract().map_err(|_| {
+                        PyTypeError::new_err(
+                            "plot() values must be numeric and convertible to a 2D float array",
+                        )
+                    })?;
+                    if rows.is_empty() {
+                        return Err(PyValueError::new_err(
+                            "plot() values must contain at least one row",
+                        ));
+                    }
+                    if rows.len() != diagnostics_n {
+                        return Err(PyValueError::new_err(format!(
+                            "plot() values rows must equal diagnostics.n; got rows={}, diagnostics.n={diagnostics_n}",
+                            rows.len()
+                        )));
+                    }
+                    let dims = rows[0].len();
+                    if dims == 0 {
+                        return Err(PyValueError::new_err(
+                            "plot() values must contain at least one column",
+                        ));
+                    }
+                    for (row_idx, row) in rows.iter().enumerate() {
+                        if row.len() != dims {
+                            return Err(PyValueError::new_err(format!(
+                                "plot() values row {row_idx} has length {}, expected {dims}",
+                                row.len()
+                            )));
+                        }
+                    }
+                    if diagnostics_d > 0 && dims != diagnostics_d {
+                        return Err(PyValueError::new_err(format!(
+                            "plot() values column count must equal diagnostics.d; got dims={dims}, diagnostics.d={diagnostics_d}"
+                        )));
+                    }
+                    let mut by_dim = vec![Vec::with_capacity(rows.len()); dims];
+                    for row in rows {
+                        for (dim, value) in row.into_iter().enumerate() {
+                            by_dim[dim].push(value);
+                        }
+                    }
+                    by_dim
+                }
+                _ => Err(PyValueError::new_err(format!(
+                    "plot() expects 1D or 2D input values; got ndim={ndim}"
+                )))?,
+            }
+        } else {
+            let segments = self.segments.as_ref().ok_or_else(|| {
+                PyValueError::new_err("plot() requires values when result.segments are unavailable")
+            })?;
+            let inferred_d = if diagnostics_d > 0 {
+                diagnostics_d
+            } else {
+                segments
+                    .iter()
+                    .filter_map(|segment| segment.mean.as_ref().map(Vec::len))
+                    .max()
+                    .unwrap_or(0)
+            };
+            build_segment_mean_summary(diagnostics_n, inferred_d, segments)?
+        };
+
+        let n_axes = series_by_dimension.len();
+        if n_axes == 0 {
+            return Err(PyValueError::new_err(
+                "plot() could not infer any plottable dimensions",
+            ));
+        }
+
+        let (figure, axes): (Py<PyAny>, Vec<Py<PyAny>>) = if let Some(provided_ax) = ax {
+            if n_axes != 1 {
+                return Err(PyValueError::new_err(
+                    "plot(ax=...) is only supported for univariate data; omit ax for multivariate plotting",
+                ));
+            }
+            let figure = provided_ax.getattr("figure").map_err(|_| {
+                PyTypeError::new_err(
+                    "plot(ax=...) requires a matplotlib Axes-like object with a 'figure' attribute",
+                )
+            })?;
+            (figure.unbind(), vec![provided_ax.clone().unbind()])
+        } else {
+            let kwargs = PyDict::new(py);
+            kwargs.set_item("sharex", n_axes > 1)?;
+            kwargs.set_item("squeeze", false)?;
+            kwargs.set_item("figsize", (10.0f64, (n_axes as f64 * 2.75).max(3.5)))?;
+
+            let subplots = pyplot.call_method("subplots", (n_axes, 1usize), Some(&kwargs))?;
+            let fig = subplots.get_item(0)?;
+            let axes_grid = subplots.get_item(1)?;
+            let axes: Vec<Py<PyAny>> = axes_grid
+                .call_method0("ravel")?
+                .call_method0("tolist")?
+                .extract()?;
+            (fig.unbind(), axes)
+        };
+
+        for (dim, (axis, series)) in axes.iter().zip(series_by_dimension.iter()).enumerate() {
+            let axis = axis.bind(py);
+            let kwargs = PyDict::new(py);
+            kwargs.set_item("linewidth", line_width)?;
+            if n_axes == 1 {
+                kwargs.set_item("label", "signal")?;
+            } else {
+                kwargs.set_item("label", format!("signal[{dim}]"))?;
+            }
+            axis.call_method("plot", (series.clone(),), Some(&kwargs))?;
+
+            if n_axes > 1 {
+                axis.call_method1("set_ylabel", (format!("x[{dim}]"),))?;
+            }
+        }
+
+        for (axis_index, axis) in axes.iter().enumerate() {
+            let axis = axis.bind(py);
+            for (cp_index, change_point) in self.change_points.iter().enumerate() {
+                let kwargs = PyDict::new(py);
+                kwargs.set_item("color", breakpoint_color)?;
+                kwargs.set_item("linestyle", breakpoint_style)?;
+                kwargs.set_item("linewidth", 1.25f64)?;
+                if axis_index == 0 && cp_index == 0 {
+                    kwargs.set_item("label", "change-point")?;
+                }
+                axis.call_method("axvline", (*change_point,), Some(&kwargs))?;
+            }
+        }
+
+        if let Some(title) = title {
+            axes[0].bind(py).call_method1("set_title", (title,))?;
+        }
+        axes[n_axes - 1]
+            .bind(py)
+            .call_method1("set_xlabel", ("t",))?;
+
+        if show_legend {
+            for axis in &axes {
+                axis.bind(py).call_method1("legend", ("best",))?;
+            }
+        }
+
+        figure.bind(py).call_method0("tight_layout")?;
+        Ok(figure)
+    }
+
     fn __repr__(&self) -> String {
         format!(
             "OfflineChangePointResult(breakpoints={:?}, change_points={:?}, scores_len={}, segments_len={})",
@@ -574,11 +842,13 @@ mod tests {
     };
     #[cfg(not(feature = "serde"))]
     use pyo3::exceptions::PyNotImplementedError;
+    use pyo3::exceptions::PyValueError;
     use pyo3::prelude::*;
-    use pyo3::types::{PyAnyMethods, PyList};
+    use pyo3::types::{PyAnyMethods, PyDict, PyList};
     #[cfg(feature = "serde")]
     use serde_json::Value;
     use std::borrow::Cow;
+    use std::ffi::CString;
     use std::sync::Once;
 
     #[cfg(feature = "serde")]
@@ -592,6 +862,16 @@ mod tests {
         static INIT: Once = Once::new();
         INIT.call_once(pyo3::prepare_freethreaded_python);
         Python::with_gil(f)
+    }
+
+    fn run_python<'py>(
+        py: Python<'py>,
+        code: &str,
+        globals: Option<&pyo3::Bound<'py, PyDict>>,
+        locals: Option<&pyo3::Bound<'py, PyDict>>,
+    ) -> PyResult<()> {
+        let code = CString::new(code).expect("python snippet should not contain NUL bytes");
+        py.run(code.as_c_str(), globals, locals)
     }
 
     fn sample_core_result() -> CoreOfflineChangePointResult {
@@ -659,6 +939,55 @@ mod tests {
             run_length_mode: 3,
             run_length_mean: 2.75,
             processing_latency_us: Some(120),
+        }
+    }
+
+    fn sample_univariate_result() -> CoreOfflineChangePointResult {
+        let diagnostics = CoreDiagnostics {
+            n: 100,
+            d: 1,
+            schema_version: DIAGNOSTICS_SCHEMA_VERSION,
+            engine_version: Some("test-engine".to_string()),
+            runtime_ms: Some(5),
+            notes: vec!["summary-only".to_string()],
+            warnings: vec![],
+            algorithm: Cow::Owned("pelt".to_string()),
+            cost_model: Cow::Owned("l2".to_string()),
+            seed: Some(3),
+            repro_mode: ReproMode::Balanced,
+            thread_count: None,
+            blas_backend: None,
+            cpu_features: None,
+            #[cfg(feature = "serde")]
+            params_json: None,
+            pruning_stats: None,
+            missing_policy_applied: None,
+            missing_fraction: None,
+            effective_sample_count: None,
+        };
+        CoreOfflineChangePointResult {
+            breakpoints: vec![50, 100],
+            change_points: vec![50],
+            scores: Some(vec![0.5]),
+            segments: Some(vec![
+                CoreSegmentStats {
+                    start: 0,
+                    end: 50,
+                    mean: Some(vec![0.0]),
+                    variance: Some(vec![1.0]),
+                    count: 50,
+                    missing_count: 0,
+                },
+                CoreSegmentStats {
+                    start: 50,
+                    end: 100,
+                    mean: Some(vec![5.0]),
+                    variance: Some(vec![1.5]),
+                    count: 50,
+                    missing_count: 0,
+                },
+            ]),
+            diagnostics,
         }
     }
 
@@ -996,6 +1325,273 @@ mod tests {
             }
 
             assert_eq!(generated, fixture);
+        });
+    }
+
+    #[test]
+    #[cfg(not(feature = "serde"))]
+    fn from_json_requires_serde_feature() {
+        with_python(|py| {
+            let py_result = Py::new(py, PyOfflineChangePointResult::from(sample_core_result()))
+                .expect("result object should be constructible");
+            let result_type = py_result
+                .bind(py)
+                .getattr("__class__")
+                .expect("result class should be available");
+
+            let err = result_type
+                .call_method1("from_json", ("{}",))
+                .expect_err("from_json should fail without serde feature");
+            assert!(err.is_instance_of::<PyNotImplementedError>(py));
+            assert!(
+                err.to_string()
+                    .contains("from_json() requires cpd-python built with serde feature")
+            );
+        });
+    }
+
+    #[test]
+    #[cfg(feature = "serde")]
+    fn from_json_roundtrip_preserves_breakpoints_and_diagnostics() {
+        with_python(|py| {
+            let py_result = Py::new(py, PyOfflineChangePointResult::from(sample_core_result()))
+                .expect("result object should be constructible");
+            let result_type = py_result
+                .bind(py)
+                .getattr("__class__")
+                .expect("result class should be available");
+
+            let json_payload: String = py_result
+                .bind(py)
+                .call_method0("to_json")
+                .expect("to_json should succeed")
+                .extract()
+                .expect("to_json should return string");
+            let roundtrip = result_type
+                .call_method1("from_json", (json_payload,))
+                .expect("from_json should succeed");
+
+            let breakpoints: Vec<usize> = roundtrip
+                .getattr("breakpoints")
+                .expect("breakpoints should be available")
+                .extract()
+                .expect("breakpoints should be typed");
+            assert_eq!(breakpoints, vec![40, 100]);
+
+            let diagnostics = roundtrip
+                .getattr("diagnostics")
+                .expect("diagnostics should be available");
+            let algorithm: String = diagnostics
+                .getattr("algorithm")
+                .expect("algorithm should be available")
+                .extract()
+                .expect("algorithm should be a string");
+            let schema_version: u32 = diagnostics
+                .getattr("schema_version")
+                .expect("schema_version should be available")
+                .extract()
+                .expect("schema_version should be int");
+            assert_eq!(algorithm, "pelt");
+            assert_eq!(schema_version, DIAGNOSTICS_SCHEMA_VERSION);
+        });
+    }
+
+    #[test]
+    #[cfg(feature = "serde")]
+    fn from_json_reports_structural_parse_errors() {
+        with_python(|py| {
+            let py_result = Py::new(py, PyOfflineChangePointResult::from(sample_core_result()))
+                .expect("result object should be constructible");
+            let result_type = py_result
+                .bind(py)
+                .getattr("__class__")
+                .expect("result class should be available");
+
+            let err = result_type
+                .call_method1("from_json", ("{\"breakpoints\": [1]}",))
+                .expect_err("missing required fields should fail");
+            assert!(err.is_instance_of::<PyValueError>(py));
+            let message = err.to_string();
+            assert!(message.contains("invalid OfflineChangePointResult JSON payload"));
+            assert!(message.contains("missing field"));
+        });
+    }
+
+    #[test]
+    #[cfg(feature = "serde")]
+    fn from_json_reports_schema_version_and_semantic_validation_errors() {
+        let mut unsupported: Value =
+            serde_json::from_str(OFFLINE_RESULT_FIXTURE_JSON).expect("fixture should parse");
+        unsupported["diagnostics"]["schema_version"] = Value::from(99u32);
+
+        let mut invalid_semantics: Value =
+            serde_json::from_str(OFFLINE_RESULT_FIXTURE_JSON).expect("fixture should parse");
+        invalid_semantics["change_points"] = Value::Array(vec![Value::from(1u64)]);
+
+        with_python(|py| {
+            let py_result = Py::new(py, PyOfflineChangePointResult::from(sample_core_result()))
+                .expect("result object should be constructible");
+            let result_type = py_result
+                .bind(py)
+                .getattr("__class__")
+                .expect("result class should be available");
+
+            let unsupported_payload =
+                serde_json::to_string(&unsupported).expect("payload should serialize");
+            let err = result_type
+                .call_method1("from_json", (unsupported_payload,))
+                .expect_err("unsupported schema should fail");
+            assert!(err.is_instance_of::<PyValueError>(py));
+            let message = err.to_string();
+            assert!(message.contains("schema_version=99"));
+            assert!(message.contains("supported versions are 1..=2"));
+
+            let invalid_payload =
+                serde_json::to_string(&invalid_semantics).expect("payload should serialize");
+            let err = result_type
+                .call_method1("from_json", (invalid_payload,))
+                .expect_err("semantic mismatch should fail");
+            assert!(err.is_instance_of::<PyValueError>(py));
+            assert!(
+                err.to_string()
+                    .contains("change_points must equal breakpoints excluding n")
+            );
+        });
+    }
+
+    #[test]
+    fn plot_reports_missing_matplotlib_with_clear_error() {
+        with_python(|py| {
+            let py_result = Py::new(
+                py,
+                PyOfflineChangePointResult::from(sample_univariate_result()),
+            )
+            .expect("result object should be constructible");
+            let locals = PyDict::new(py);
+            locals
+                .set_item("result", py_result)
+                .expect("locals should accept result");
+
+            run_python(
+                py,
+                r#"
+import builtins
+
+_orig_import = builtins.__import__
+def _blocked(name, *args, **kwargs):
+    if name == "matplotlib" or name.startswith("matplotlib."):
+        raise ImportError("blocked for plot test")
+    return _orig_import(name, *args, **kwargs)
+
+builtins.__import__ = _blocked
+try:
+    try:
+        result.plot()
+        raise AssertionError("plot() should require matplotlib")
+    except ImportError as exc:
+        assert "plot() requires optional dependency 'matplotlib'" in str(exc)
+finally:
+    builtins.__import__ = _orig_import
+"#,
+                None,
+                Some(&locals),
+            )
+            .expect("missing matplotlib path should be explicit");
+        });
+    }
+
+    #[test]
+    fn plot_supports_univariate_and_multivariate_paths_with_fake_backend() {
+        with_python(|py| {
+            let univariate = Py::new(
+                py,
+                PyOfflineChangePointResult::from(sample_univariate_result()),
+            )
+            .expect("univariate result should be constructible");
+            let multivariate = Py::new(py, PyOfflineChangePointResult::from(sample_core_result()))
+                .expect("multivariate result should be constructible");
+            let locals = PyDict::new(py);
+            locals
+                .set_item("univariate", univariate)
+                .expect("locals should accept univariate");
+            locals
+                .set_item("multivariate", multivariate)
+                .expect("locals should accept multivariate");
+
+            run_python(
+                py,
+                r#"
+import sys
+import types
+import numpy as np
+
+class _FakeAxis:
+    def __init__(self):
+        self.lines = []
+        self.vlines = []
+        self.xlabel = None
+        self.ylabel = None
+        self.title = None
+        self.legend_calls = 0
+        self.figure = None
+    def plot(self, y, **kwargs):
+        self.lines.append((list(y), dict(kwargs)))
+    def axvline(self, x, **kwargs):
+        self.vlines.append((int(x), dict(kwargs)))
+    def set_title(self, title):
+        self.title = title
+    def set_ylabel(self, ylabel):
+        self.ylabel = ylabel
+    def set_xlabel(self, xlabel):
+        self.xlabel = xlabel
+    def legend(self, *_args, **_kwargs):
+        self.legend_calls += 1
+
+class _FakeFigure:
+    def __init__(self):
+        self.axes = []
+        self.tight_layout_calls = 0
+    def tight_layout(self):
+        self.tight_layout_calls += 1
+
+def _subplots(rows, cols=1, **_kwargs):
+    fig = _FakeFigure()
+    axes_grid = np.empty((rows, cols), dtype=object)
+    for r in range(rows):
+        for c in range(cols):
+            axis = _FakeAxis()
+            axis.figure = fig
+            axes_grid[r, c] = axis
+            fig.axes.append(axis)
+    return fig, axes_grid
+
+pyplot = types.ModuleType("matplotlib.pyplot")
+pyplot.subplots = _subplots
+matplotlib = types.ModuleType("matplotlib")
+matplotlib.pyplot = pyplot
+sys.modules["matplotlib"] = matplotlib
+sys.modules["matplotlib.pyplot"] = pyplot
+
+uni_fig = univariate.plot(values=np.linspace(0.0, 1.0, 100), title="univariate")
+assert len(uni_fig.axes) == 1
+assert len(uni_fig.axes[0].lines) == 1
+assert [x for x, _ in uni_fig.axes[0].vlines] == [50]
+assert uni_fig.axes[0].title == "univariate"
+assert uni_fig.tight_layout_calls == 1
+
+multi_fig = multivariate.plot()
+assert len(multi_fig.axes) == 2
+assert all(len(axis.lines) == 1 for axis in multi_fig.axes)
+assert all([x for x, _ in axis.vlines] == [40] for axis in multi_fig.axes)
+assert multi_fig.axes[0].ylabel == "x[0]"
+assert multi_fig.axes[1].ylabel == "x[1]"
+assert multi_fig.axes[1].xlabel == "t"
+assert multi_fig.tight_layout_calls == 1
+"#,
+                None,
+                Some(&locals),
+            )
+            .expect("fake backend should exercise plot paths");
         });
     }
 

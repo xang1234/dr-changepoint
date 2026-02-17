@@ -75,7 +75,32 @@ print("Cost model:", low_level.diagnostics.cost_model)
 `preprocess` is strictly validated: unsupported keys or invalid method/parameter
 combinations raise `ValueError`.
 
-## 4. Run provided examples
+## 4. Serialize results and plot breakpoints
+
+```python
+import cpd
+import numpy as np
+
+x = np.concatenate([
+    np.zeros(50, dtype=np.float64),
+    np.full(50, 5.0, dtype=np.float64),
+    np.full(50, -2.0, dtype=np.float64),
+])
+
+result = cpd.Pelt(model="l2", min_segment_len=2).fit(x).predict(n_bkps=2)
+
+payload = result.to_json()
+restored = cpd.OfflineChangePointResult.from_json(payload)
+assert restored.breakpoints == result.breakpoints
+
+try:
+    fig = restored.plot(x, title="Quickstart breakpoint view")
+except ImportError:
+    # Plotting is optional; install with `python -m pip install matplotlib`.
+    fig = None
+```
+
+## 5. Run provided examples
 
 ```bash
 cpd/python/.venv/bin/python cpd/python/examples/synthetic_signal.py

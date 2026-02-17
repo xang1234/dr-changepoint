@@ -80,6 +80,19 @@ class OfflineChangePointResult:
     @property
     def diagnostics(self) -> Diagnostics: ...
     def to_json(self) -> str: ...
+    @staticmethod
+    def from_json(payload: str) -> OfflineChangePointResult: ...
+    def plot(
+        self,
+        values: Any | None = None,
+        *,
+        ax: Any | None = None,
+        title: str | None = None,
+        breakpoint_color: str = "crimson",
+        breakpoint_style: str = "--",
+        line_width: float = 1.5,
+        show_legend: bool = True,
+    ) -> Any: ...
 
 
 class OnlineStepResult:

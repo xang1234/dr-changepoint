@@ -17,9 +17,6 @@ import cpd  # noqa: E402
 
 try:
     import matplotlib
-
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
 except ImportError as exc:  # pragma: no cover
     raise SystemExit(
         "matplotlib is required for this script. Install with: python -m pip install matplotlib"
@@ -53,19 +50,8 @@ def main() -> int:
 
     values = build_signal()
     result = cpd.Pelt(model="l2", min_segment_len=2).fit(values).predict(n_bkps=2)
-
-    fig, ax = plt.subplots(figsize=(10, 3.5))
-    ax.plot(values, linewidth=1.5, label="signal")
-
-    for idx, breakpoint in enumerate(result.change_points):
-        label = "change-point" if idx == 0 else None
-        ax.axvline(breakpoint, color="crimson", linestyle="--", linewidth=1.5, label=label)
-
-    ax.set_title("MVP-A offline change-point detection")
-    ax.set_xlabel("t")
-    ax.set_ylabel("x[t]")
-    ax.legend(loc="best")
-    fig.tight_layout()
+    matplotlib.use("Agg")
+    fig = result.plot(values, title="MVP-A offline change-point detection")
     fig.savefig(out_path, dpi=150)
     print(f"saved {out_path}")
     return 0

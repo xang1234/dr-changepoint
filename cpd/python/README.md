@@ -81,7 +81,8 @@ see [`../docs/reproducibility_modes.md`](../docs/reproducibility_modes.md).
 
 ## Result JSON Contract
 
-`OfflineChangePointResult.to_json()` follows the versioned contract in
+`OfflineChangePointResult.to_json()` / `OfflineChangePointResult.from_json(...)`
+follow the versioned contract in
 [`../docs/result_json_contract.md`](../docs/result_json_contract.md), with the
 canonical schema marker at `diagnostics.schema_version`.
 
@@ -117,6 +118,17 @@ low = cpd.detect_offline(
         "robust_scale": {"mad_epsilon": 1e-9, "normal_consistency": 1.4826},
     },  # optional; requires preprocess feature
 )
+
+payload = pelt.to_json()
+restored = cpd.OfflineChangePointResult.from_json(payload)
+assert restored.breakpoints == pelt.breakpoints
+
+try:
+    fig = restored.plot(x, title="Detected breakpoints")
+except ImportError:
+    # Plotting remains optional.
+    # Install with: python -m pip install matplotlib
+    fig = None
 ```
 
 ## Stopping and Penalty Guide
@@ -261,4 +273,4 @@ to verify architecture and run the CI-aligned local sanity flow.
   - `pipeline` accepts both simplified Python dicts (for example `{"detector": {"kind": "pelt"}}`) and Rust `PipelineSpec` serde shape (for example `{"detector": {"Offline": {"Pelt": {...}}}, ...}`).
 - `OfflineChangePointResult`
   - fields: `breakpoints`, `change_points`, `scores`, `segments`, `diagnostics`
-  - helper: `to_json()` (`from_json(...)` is planned and not yet implemented)
+  - helpers: `to_json()`, `from_json(payload)`, `plot(values=None, *, ax=None, title=...)`
