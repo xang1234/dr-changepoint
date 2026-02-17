@@ -1,6 +1,6 @@
 # Fuzzing Guide
 
-This repository uses `cargo-fuzz` to harden panic/crash behavior for core offline and Python interop surfaces.
+This repository uses `cargo-fuzz` to harden panic/crash behavior for core offline, online, and Python interop surfaces.
 
 ## Fuzz Package
 

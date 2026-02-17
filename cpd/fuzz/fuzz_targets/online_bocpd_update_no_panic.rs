@@ -179,6 +179,30 @@ fn build_timestamp(current_ts: &mut i64, mode_seed: u8, delta_seed: i16) -> Opti
     }
 }
 
+fn build_cost_eval_budget(seed: u8) -> Option<usize> {
+    match seed % 8 {
+        0 => Some(0),
+        1 => Some(1),
+        2 => Some(usize::from((seed % 4).saturating_add(2))),
+        _ => None,
+    }
+}
+
+fn choose_dims(seed: u8, extra_seed: u8) -> usize {
+    match seed % 8 {
+        0 => 0,
+        1 => 2,
+        2 => 3,
+        _ => {
+            if extra_seed & 1 == 0 {
+                1
+            } else {
+                4
+            }
+        }
+    }
+}
+
 fuzz_target!(|data: &[u8]| {
     let mut cursor = common::ByteCursor::new(data);
 
@@ -243,11 +267,7 @@ fuzz_target!(|data: &[u8]| {
 
         let budget_seed = cursor.next_u8();
         let constraints = Constraints {
-            max_cost_evals: if budget_seed & 1 == 0 {
-                None
-            } else {
-                Some(usize::from(budget_seed % 4))
-            },
+            max_cost_evals: build_cost_eval_budget(budget_seed),
             ..Constraints::default()
         };
         let ctx = ExecutionContext::new(&constraints);
@@ -257,13 +277,7 @@ fuzz_target!(|data: &[u8]| {
         let raw_seed = cursor.next_i16();
         let x = build_observation_value(model_kind, base, cursor.next_u8(), raw_seed);
 
-        let dims = match cursor.next_u8() % 5 {
-            0 => 0,
-            1 => 1,
-            2 => 2,
-            3 => 3,
-            _ => common::bounded(cursor.next_u8(), 1, 4),
-        };
+        let dims = choose_dims(cursor.next_u8(), cursor.next_u8());
 
         let mut x_t = Vec::with_capacity(dims);
         for dim in 0..dims {
