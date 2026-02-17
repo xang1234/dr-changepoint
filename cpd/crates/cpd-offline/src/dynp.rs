@@ -711,8 +711,8 @@ mod tests {
     use super::{Dynp, DynpConfig};
     use crate::{Pelt, PeltConfig};
     use cpd_core::{
-        Constraints, DTypeView, ExecutionContext, MemoryLayout, MissingPolicy, OfflineDetector,
-        Penalty, ReproMode, Stopping, TimeIndex, TimeSeriesView,
+        Constraints, CpdError, DTypeView, ExecutionContext, MemoryLayout, MissingPolicy,
+        OfflineDetector, Penalty, ReproMode, Stopping, TimeIndex, TimeSeriesView,
     };
     use cpd_costs::{CostL2Mean, CostNormalMeanVar};
 
@@ -793,7 +793,10 @@ mod tests {
             },
         )
         .expect_err("k=0 should be rejected during config validation");
-        assert!(err.to_string().contains("k >= 1"));
+        match err {
+            CpdError::InvalidInput(msg) => assert!(msg.contains("KnownK")),
+            _ => panic!("expected InvalidInput for k=0"),
+        }
     }
 
     #[test]
@@ -801,7 +804,7 @@ mod tests {
         let detector = Dynp::new(
             CostL2Mean::default(),
             DynpConfig {
-                stopping: Stopping::KnownK(6),
+                stopping: Stopping::KnownK(7),
                 cancel_check_every: 4,
             },
         )
@@ -824,7 +827,7 @@ mod tests {
 
         let message = err.to_string();
         assert!(message.contains("KnownK exact solution unreachable"));
-        assert!(message.contains("requested k=6"));
+        assert!(message.contains("requested k=7"));
     }
 
     #[test]
