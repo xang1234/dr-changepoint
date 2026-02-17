@@ -100,14 +100,16 @@ outputs = [
     ),
 ]
 
+restored_outputs = []
 for result in outputs:
     payload = result.to_json()
     restored = cpd.OfflineChangePointResult.from_json(payload)
     assert restored.breakpoints == result.breakpoints
     assert restored.change_points == result.change_points
+    restored_outputs.append(restored)
 
 try:
-    fig = outputs[0].plot(x, title="Quickstart breakpoint view")
+    fig = restored_outputs[0].plot(x, title="Quickstart breakpoint view")
 except ImportError:
     # Plotting is optional; install with `python -m pip install matplotlib`.
     fig = None

@@ -378,7 +378,10 @@ def test_detect_offline_rejects_pipeline_fpop_with_non_l2_cost() -> None:
         "cost": "normal",
         "stopping": {"n_bkps": 2},
     }
-    with pytest.raises(ValueError, match="pipeline.detector='fpop' requires pipeline.cost='l2'"):
+    with pytest.raises(
+        ValueError,
+        match=r"(pipeline\.detector='fpop' requires pipeline\.cost='l2'|detector=fpop requires cost=l2)",
+    ):
         cpd.detect_offline(x, pipeline=pipeline)
 
 

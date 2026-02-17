@@ -111,12 +111,6 @@ low = cpd.detect_offline(
     cost="l2",
     constraints={"min_segment_len": 2},
     stopping={"n_bkps": 2},
-    preprocess={
-        "detrend": {"method": "polynomial", "degree": 2},
-        "deseasonalize": {"method": "stl_like", "period": 4},
-        "winsorize": {"lower_quantile": 0.05, "upper_quantile": 0.95},
-        "robust_scale": {"mad_epsilon": 1e-9, "normal_consistency": 1.4826},
-    },  # optional; requires preprocess feature
 )
 segneigh = cpd.detect_offline(
     x,
