@@ -4,7 +4,7 @@
 
 ```bash
 python -m pip install --upgrade pip
-python -m pip install changepoint-doctor==0.0.1
+python -m pip install changepoint-doctor==0.0.2
 python -c "import cpd; print(cpd.__version__)"
 ```
 

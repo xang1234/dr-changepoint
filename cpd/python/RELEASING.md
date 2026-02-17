@@ -6,7 +6,7 @@ This project publishes Python artifacts with GitHub Actions via
 ## Target package/version
 
 - Distribution name: `changepoint-doctor`
-- Release version: `0.0.1`
+- Release version: `0.0.2`
 - Import package: `cpd`
 
 ## Local artifact sanity check
@@ -18,15 +18,15 @@ cd cpd/python
 python -m pip install --upgrade pip maturin
 maturin build --release --interpreter python
 maturin sdist --out dist
-ls -1 ../target/wheels/changepoint_doctor-0.0.1-*.whl
-ls -1 dist/changepoint_doctor-0.0.1.tar.gz
+ls -1 ../target/wheels/changepoint_doctor-0.0.2-*.whl
+ls -1 dist/changepoint_doctor-0.0.2.tar.gz
 ```
 
 ## CI/CD release flow
 
 1. Push a git tag for the release:
-   - `git tag v0.0.1`
-   - `git push origin v0.0.1`
+   - `git tag v0.0.2`
+   - `git push origin v0.0.2`
 2. The `release` workflow builds:
    - Linux wheels
    - macOS wheels

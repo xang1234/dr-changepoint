@@ -7,11 +7,11 @@ and [`../docs/clean_room_policy.md`](../docs/clean_room_policy.md).
 
 ## Install
 
-From PyPI (target release `0.0.1`):
+From PyPI (target release `0.0.2`):
 
 ```bash
 python -m pip install --upgrade pip
-python -m pip install changepoint-doctor==0.0.1
+python -m pip install changepoint-doctor==0.0.2
 ```
 
 For local development from this repository:
