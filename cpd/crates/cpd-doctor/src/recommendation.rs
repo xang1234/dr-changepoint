@@ -609,6 +609,48 @@ pub struct ValidationReport {
     pub notes: Vec<String>,
 }
 
+/// Configuration for experimental ensemble execution.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[derive(Clone, Debug, PartialEq)]
+pub struct EnsembleConfig {
+    /// Number of top-ranked recommendations to execute.
+    pub top_k: usize,
+    /// Breakpoint matching tolerance in samples.
+    pub tolerance: usize,
+    /// Minimum vote ratio required for a consensus breakpoint.
+    pub min_consensus_ratio: f64,
+    /// Optional deterministic seed override for stochastic pipelines.
+    pub seed: Option<u64>,
+}
+
+impl Default for EnsembleConfig {
+    fn default() -> Self {
+        Self {
+            top_k: 3,
+            tolerance: 3,
+            min_consensus_ratio: 0.5,
+            seed: None,
+        }
+    }
+}
+
+/// Per-breakpoint consensus output for ensemble execution.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[derive(Clone, Debug, PartialEq)]
+pub struct EnsembleBreakpoint {
+    pub index: usize,
+    pub consensus_score: f64,
+    pub votes: usize,
+}
+
+/// Output from ensemble execution across multiple offline pipelines.
+#[derive(Clone, Debug, PartialEq)]
+pub struct EnsembleReport {
+    pub breakpoints: Vec<EnsembleBreakpoint>,
+    pub pipeline_results: Vec<(PipelineSpec, OfflineChangePointResult)>,
+    pub notes: Vec<String>,
+}
+
 #[derive(Clone, Debug)]
 struct ValidationDownsampledInput {
     values: Vec<f64>,
@@ -876,6 +918,146 @@ pub fn execute_pipeline_with_repro_mode(
         ));
     }
     run_offline_pipeline(x, pipeline, repro_mode)
+}
+
+pub fn execute_ensemble(
+    x: &TimeSeriesView<'_>,
+    recommendations: &[Recommendation],
+    config: &EnsembleConfig,
+) -> Result<EnsembleReport, CpdError> {
+    if recommendations.is_empty() {
+        return Err(CpdError::invalid_input(
+            "execute_ensemble requires at least one recommendation",
+        ));
+    }
+    if config.top_k == 0 {
+        return Err(CpdError::invalid_input(
+            "execute_ensemble requires top_k >= 1; got 0",
+        ));
+    }
+    if !config.min_consensus_ratio.is_finite() || !(0.0..=1.0).contains(&config.min_consensus_ratio)
+    {
+        return Err(CpdError::invalid_input(format!(
+            "execute_ensemble min_consensus_ratio must be finite and in [0, 1]; got {}",
+            config.min_consensus_ratio
+        )));
+    }
+
+    let selected_len = recommendations.len().min(config.top_k);
+    let mut notes = Vec::new();
+    if selected_len < config.top_k {
+        notes.push(format!(
+            "requested top_k={} but only {} recommendations were provided",
+            config.top_k,
+            recommendations.len()
+        ));
+    }
+
+    let mut pipeline_results = Vec::<(PipelineSpec, OfflineChangePointResult)>::new();
+    for (rank, recommendation) in recommendations.iter().take(selected_len).enumerate() {
+        if recommendation.pipeline.is_online() {
+            notes.push(format!(
+                "skipped recommendation rank {} because online pipelines do not produce OfflineChangePointResult",
+                rank + 1
+            ));
+            continue;
+        }
+
+        let effective_pipeline = pipeline_with_seed_override(&recommendation.pipeline, config.seed);
+        match run_offline_pipeline(x, &effective_pipeline, ReproMode::Balanced) {
+            Ok(result) => pipeline_results.push((effective_pipeline, result)),
+            Err(err) => notes.push(format!(
+                "ensemble run failed for recommendation rank {} (pipeline={}): {err}",
+                rank + 1,
+                pipeline_id_spec(&effective_pipeline)
+            )),
+        }
+    }
+
+    if pipeline_results.is_empty() {
+        return Err(CpdError::invalid_input(
+            "execute_ensemble could not execute any offline pipelines",
+        ));
+    }
+
+    #[derive(Clone, Debug)]
+    struct Cluster {
+        anchor: usize,
+        points: Vec<usize>,
+        pipelines: Vec<usize>,
+    }
+
+    fn median_index(points: &[usize]) -> usize {
+        let mut sorted = points.to_vec();
+        sorted.sort_unstable();
+        sorted[sorted.len() / 2]
+    }
+
+    let mut clusters = Vec::<Cluster>::new();
+    for (pipeline_idx, (_pipeline, result)) in pipeline_results.iter().enumerate() {
+        for &cp in result.change_points.as_slice() {
+            let mut best_cluster = None;
+            let mut best_distance = usize::MAX;
+            for (cluster_idx, cluster) in clusters.iter().enumerate() {
+                let distance = cluster.anchor.abs_diff(cp);
+                if distance <= config.tolerance && distance < best_distance {
+                    best_distance = distance;
+                    best_cluster = Some(cluster_idx);
+                }
+            }
+
+            if let Some(cluster_idx) = best_cluster {
+                let cluster = &mut clusters[cluster_idx];
+                cluster.points.push(cp);
+                if !cluster.pipelines.contains(&pipeline_idx) {
+                    cluster.pipelines.push(pipeline_idx);
+                }
+                cluster.anchor = median_index(cluster.points.as_slice());
+            } else {
+                clusters.push(Cluster {
+                    anchor: cp,
+                    points: vec![cp],
+                    pipelines: vec![pipeline_idx],
+                });
+            }
+        }
+    }
+
+    let pipeline_count = pipeline_results.len();
+    let mut breakpoints = clusters
+        .into_iter()
+        .filter_map(|cluster| {
+            let votes = cluster.pipelines.len();
+            if votes == 0 {
+                return None;
+            }
+            let consensus_score = votes as f64 / pipeline_count as f64;
+            if consensus_score + f64::EPSILON < config.min_consensus_ratio {
+                return None;
+            }
+            Some(EnsembleBreakpoint {
+                index: median_index(cluster.points.as_slice()),
+                consensus_score,
+                votes,
+            })
+        })
+        .collect::<Vec<_>>();
+    breakpoints.sort_by(|left, right| left.index.cmp(&right.index));
+
+    notes.push(format!(
+        "ensemble_executed={} pipeline(s), tolerance=±{}, min_consensus_ratio={}",
+        pipeline_count, config.tolerance, config.min_consensus_ratio
+    ));
+    notes.push(format!(
+        "ensemble_consensus_breakpoints={}",
+        breakpoints.len()
+    ));
+
+    Ok(EnsembleReport {
+        breakpoints,
+        pipeline_results,
+        notes,
+    })
 }
 
 pub fn validate_top_k(
@@ -3337,9 +3519,7 @@ fn pipeline_label(pipeline: &PipelineConfig) -> &'static str {
             (OfflineDetectorConfig::Wbs(_), OfflineCostKind::Rank) => "WBS + Rank",
             (OfflineDetectorConfig::SegNeigh(_), OfflineCostKind::Ar) => "Dynp + AR",
             (OfflineDetectorConfig::SegNeigh(_), OfflineCostKind::Cosine) => "Dynp + Cosine",
-            (OfflineDetectorConfig::SegNeigh(_), OfflineCostKind::L1Median) => {
-                "Dynp + L1 median"
-            }
+            (OfflineDetectorConfig::SegNeigh(_), OfflineCostKind::L1Median) => "Dynp + L1 median",
             (OfflineDetectorConfig::SegNeigh(_), OfflineCostKind::L2) => "Dynp + L2",
             (OfflineDetectorConfig::SegNeigh(_), OfflineCostKind::Normal) => "Dynp + Normal",
             (OfflineDetectorConfig::SegNeigh(_), OfflineCostKind::NormalFullCov) => {

@@ -6,6 +6,10 @@ pub mod binseg;
 pub mod bottomup;
 pub mod dynp;
 pub mod fpop;
+#[cfg(feature = "gp")]
+pub mod gp;
+#[cfg(feature = "kernel")]
+pub mod kernel;
 pub mod pelt;
 #[cfg(feature = "serde")]
 pub mod schema_migration;
@@ -16,6 +20,10 @@ pub use binseg::{BinSeg, BinSegConfig};
 pub use bottomup::{BottomUp, BottomUpConfig};
 pub use dynp::{Dynp, DynpConfig};
 pub use fpop::{Fpop, FpopConfig};
+#[cfg(feature = "gp")]
+pub use gp::{ArgpConfig, ArgpCpd, GpConfig, GpCpd, GpKernel};
+#[cfg(feature = "kernel")]
+pub use kernel::{KernelCpd, KernelCpdConfig, KernelSpec};
 pub use pelt::{Pelt, PeltConfig};
 #[cfg(feature = "serde")]
 pub use schema_migration::{BinSegConfigWire, PeltConfigWire, WbsConfigWire};
