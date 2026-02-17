@@ -1383,6 +1383,13 @@ fn parse_pipeline_spec(pipeline: &Bound<'_, PyAny>) -> PyResult<DoctorPipelineSp
             "detect_offline requires pipeline.cost to be one of: 'l1_median', 'l2', 'normal', 'nig'",
         ));
     }
+    if matches!(&detector, DoctorOfflineDetectorConfig::Fpop(_))
+        && !matches!(cost, DoctorCostConfig::L2)
+    {
+        return Err(PyValueError::new_err(
+            "pipeline.detector='fpop' requires pipeline.cost='l2'",
+        ));
+    }
     let constraints = parse_constraints(dict.get_item("constraints")?.as_ref())?;
     let stopping = match dict.get_item("stopping")? {
         Some(value) if !value.is_none() => parse_pipeline_stopping_compat(Some(&value))?,
@@ -2711,7 +2718,7 @@ fn _cpd_rs(module: &Bound<'_, PyModule>) -> PyResult<()> {
 mod tests {
     use super::{
         _cpd_rs, PyBinseg, PyFpop, PyPelt, SmokeDetector, UPDATE_MANY_GIL_RELEASE_MIN_WORK_ITEMS,
-        should_release_gil_for_update_many, smoke_detect,
+        parse_pipeline_spec, should_release_gil_for_update_many, smoke_detect,
     };
     use pyo3::Python;
     use pyo3::exceptions::{PyRuntimeError, PyValueError};
@@ -2963,6 +2970,39 @@ mod tests {
                 Some(&locals),
             )
             .expect("fpop should reject non-l2 cost");
+        });
+    }
+
+    #[test]
+    fn detect_offline_pipeline_rejects_fpop_with_non_l2_cost() {
+        with_python(|py| {
+            let pipeline = PyDict::new(py);
+            let detector = PyDict::new(py);
+            detector
+                .set_item("kind", "fpop")
+                .expect("detector.kind should be set");
+            pipeline
+                .set_item("detector", &detector)
+                .expect("pipeline.detector should be set");
+            pipeline
+                .set_item("cost", "normal")
+                .expect("pipeline.cost should be set");
+            let stopping = PyDict::new(py);
+            stopping
+                .set_item("n_bkps", 1)
+                .expect("stopping.n_bkps should be set");
+            pipeline
+                .set_item("stopping", &stopping)
+                .expect("pipeline.stopping should be set");
+
+            let err =
+                parse_pipeline_spec(pipeline.as_any()).expect_err("pipeline parse should fail");
+            assert!(err.is_instance_of::<PyValueError>(py));
+            assert!(
+                err.to_string()
+                    .contains("pipeline.detector='fpop' requires pipeline.cost='l2'"),
+                "unexpected error message: {err}"
+            );
         });
     }
 

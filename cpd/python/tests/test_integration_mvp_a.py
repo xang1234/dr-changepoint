@@ -203,6 +203,17 @@ def test_detect_offline_rejects_invalid_parameters() -> None:
         cpd.detect_offline(x, detector="fpop", cost="normal", stopping={"n_bkps": 2})
 
 
+def test_detect_offline_rejects_pipeline_fpop_with_non_l2_cost() -> None:
+    x = _three_regime_signal()
+    pipeline = {
+        "detector": {"kind": "fpop"},
+        "cost": "normal",
+        "stopping": {"n_bkps": 2},
+    }
+    with pytest.raises(ValueError, match="pipeline.detector='fpop' requires pipeline.cost='l2'"):
+        cpd.detect_offline(x, pipeline=pipeline)
+
+
 def test_detect_offline_rejects_preprocess_without_feature() -> None:
     x = _three_regime_signal()
     with pytest.raises(ValueError, match="preprocess feature"):
