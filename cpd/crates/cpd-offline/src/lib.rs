@@ -9,6 +9,7 @@ pub mod pelt;
 #[cfg(feature = "serde")]
 pub mod schema_migration;
 pub mod wbs;
+pub mod window;
 
 pub use binseg::{BinSeg, BinSegConfig};
 pub use bottomup::{BottomUp, BottomUpConfig};
@@ -17,6 +18,7 @@ pub use pelt::{Pelt, PeltConfig};
 #[cfg(feature = "serde")]
 pub use schema_migration::{BinSegConfigWire, PeltConfigWire, WbsConfigWire};
 pub use wbs::{Wbs, WbsConfig, WbsIntervalStrategy};
+pub use window::{SlidingWindow, SlidingWindowConfig};
 
 /// Offline detector namespace placeholder.
 pub fn crate_name() -> &'static str {
