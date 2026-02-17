@@ -39,8 +39,8 @@ jobs:
             platform_artifact: linux-manylinux-x86_64
             cibw_archs: x86_64
           - runner: macos-latest
-            platform_artifact: macos-universal2
-            cibw_archs: universal2
+            platform_artifact: macos-arm64
+            cibw_archs: arm64
           - runner: windows-2022
             platform_artifact: windows-amd64
             cibw_archs: AMD64
@@ -56,10 +56,6 @@ jobs:
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
-
-      - name: Install macOS Rust targets for universal2
-        if: runner.os == 'macOS'
-        run: rustup target add x86_64-apple-darwin aarch64-apple-darwin
 
       - name: Cache Rust artifacts
         uses: Swatinem/rust-cache@v2
