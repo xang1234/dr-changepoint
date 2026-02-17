@@ -23,6 +23,7 @@ before debugging `pyo3`/linker errors.
 
 - `cpd.Pelt`: high-level PELT detector.
 - `cpd.Binseg`: high-level Binary Segmentation detector.
+- `cpd.Fpop`: high-level FPOP detector (L2 cost only).
 - `cpd.detect_offline`: low-level API for explicit detector/cost/constraints/stopping/preprocess selection.
 - `cpd.OfflineChangePointResult`: typed result object with breakpoints and diagnostics.
 
@@ -64,8 +65,8 @@ If BinSeg diagnostics indicate masking risk (for example warnings that closely
 spaced weaker changes may be hidden), prefer Wild Binary Segmentation (WBS) in
 Rust/offline flows (`cpd-offline::Wbs`) for stronger recovery.
 
-Current Python high-level APIs intentionally remain limited to `cpd.Pelt` and
-`cpd.Binseg`; WBS is not yet exposed as a Python high-level detector.
+Python high-level APIs expose `cpd.Pelt`, `cpd.Binseg`, and `cpd.Fpop`.
+WBS is not yet exposed as a Python high-level detector.
 
 ## Quickstart
 
@@ -102,6 +103,7 @@ x = np.concatenate([
 
 pelt = cpd.Pelt(model="l2").fit(x).predict(n_bkps=2)
 binseg = cpd.Binseg(model="l2").fit(x).predict(n_bkps=2)
+fpop = cpd.Fpop(min_segment_len=2).fit(x).predict(n_bkps=2)
 low = cpd.detect_offline(
     x,
     detector="pelt",
@@ -249,7 +251,11 @@ to verify architecture and run the CI-aligned local sanity flow.
 - `Binseg(model="l2"|"normal", min_segment_len, jump, max_change_points, max_depth)`
   - `.fit(x)` -> detector
   - `.predict(pen=..., n_bkps=...)` -> `OfflineChangePointResult`
+- `Fpop(min_segment_len, jump, max_change_points)` (`l2` only)
+  - `.fit(x)` -> detector
+  - `.predict(pen=..., n_bkps=...)` -> `OfflineChangePointResult`
 - `detect_offline(x, pipeline=None, detector, cost, constraints, stopping, preprocess, repro_mode, return_diagnostics)`
+  - `detector` accepts `pelt`, `binseg`, or `fpop` (`fpop` requires `cost="l2"`).
   - `pipeline` accepts both simplified Python dicts (for example `{"detector": {"kind": "pelt"}}`) and Rust `PipelineSpec` serde shape (for example `{"detector": {"Offline": {"Pelt": {...}}}, ...}`).
 - `OfflineChangePointResult`
   - fields: `breakpoints`, `change_points`, `scores`, `segments`, `diagnostics`

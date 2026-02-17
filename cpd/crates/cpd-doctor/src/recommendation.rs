@@ -12,7 +12,9 @@ use cpd_core::{
     validate_constraints_config,
 };
 use cpd_costs::{CostAR, CostL1Median, CostL2Mean, CostModel, CostNIGMarginal, CostNormalMeanVar};
-use cpd_offline::{BinSeg, BinSegConfig, Pelt, PeltConfig, Wbs, WbsConfig, WbsIntervalStrategy};
+use cpd_offline::{
+    BinSeg, BinSegConfig, Fpop, FpopConfig, Pelt, PeltConfig, Wbs, WbsConfig, WbsIntervalStrategy,
+};
 use cpd_online::{
     BernoulliBetaPrior, BocpdConfig, CusumConfig, GaussianNigPrior, ObservationModel,
     PageHinkleyConfig, PoissonGammaPrior,
@@ -331,6 +333,7 @@ fn extract_stopping(detector: &OfflineDetectorConfig) -> Stopping {
     match detector {
         OfflineDetectorConfig::Pelt(config) => config.stopping.clone(),
         OfflineDetectorConfig::BinSeg(config) => config.stopping.clone(),
+        OfflineDetectorConfig::Fpop(config) => config.stopping.clone(),
         OfflineDetectorConfig::Wbs(config) => config.stopping.clone(),
     }
 }
@@ -338,7 +341,9 @@ fn extract_stopping(detector: &OfflineDetectorConfig) -> Stopping {
 fn extract_seed(detector: &OfflineDetectorConfig) -> Option<u64> {
     match detector {
         OfflineDetectorConfig::Wbs(config) => Some(config.seed),
-        OfflineDetectorConfig::Pelt(_) | OfflineDetectorConfig::BinSeg(_) => None,
+        OfflineDetectorConfig::Pelt(_)
+        | OfflineDetectorConfig::BinSeg(_)
+        | OfflineDetectorConfig::Fpop(_) => None,
     }
 }
 
@@ -375,6 +380,20 @@ fn with_stopping_and_seed(
                 ));
             }
             Ok(OfflineDetectorConfig::BinSeg(config.clone()))
+        }
+        OfflineDetectorConfig::Fpop(config) => {
+            if config.stopping != *stopping {
+                return Err(CpdError::invalid_input(format!(
+                    "offline pipeline has inconsistent stopping configuration for detector=fpop: detector.stopping={:?}, pipeline.stopping={:?}",
+                    config.stopping, stopping
+                )));
+            }
+            if seed.is_some() {
+                return Err(CpdError::invalid_input(
+                    "offline pipeline seed is only supported for detector=wbs",
+                ));
+            }
+            Ok(OfflineDetectorConfig::Fpop(config.clone()))
         }
         OfflineDetectorConfig::Wbs(config) => {
             if config.stopping != *stopping {
@@ -504,6 +523,7 @@ pub enum PipelineConfig {
 pub enum OfflineDetectorConfig {
     Pelt(PeltConfig),
     BinSeg(BinSegConfig),
+    Fpop(FpopConfig),
     Wbs(WbsConfig),
 }
 
@@ -1223,7 +1243,7 @@ fn run_offline_pipeline_with_config(
             CostL1Median::new(repro_mode),
         ),
         OfflineCostKind::L2 => {
-            run_offline_detector_with_cost(detect_view, detector, &ctx, CostL2Mean::new(repro_mode))
+            run_offline_detector_with_l2_cost(detect_view, detector, &ctx, repro_mode)
         }
         OfflineCostKind::Normal => run_offline_detector_with_cost(
             detect_view,
@@ -1253,7 +1273,32 @@ fn run_offline_detector_with_cost<C: CostModel>(
         OfflineDetectorConfig::BinSeg(config) => {
             BinSeg::new(cost_model, config.clone())?.detect(x, ctx)
         }
+        OfflineDetectorConfig::Fpop(_) => {
+            Err(CpdError::invalid_input("detector=fpop requires cost=l2"))
+        }
         OfflineDetectorConfig::Wbs(config) => Wbs::new(cost_model, config.clone())?.detect(x, ctx),
+    }
+}
+
+fn run_offline_detector_with_l2_cost(
+    x: &TimeSeriesView<'_>,
+    detector: &OfflineDetectorConfig,
+    ctx: &ExecutionContext<'_>,
+    repro_mode: ReproMode,
+) -> Result<OfflineChangePointResult, CpdError> {
+    match detector {
+        OfflineDetectorConfig::Pelt(config) => {
+            Pelt::new(CostL2Mean::new(repro_mode), config.clone())?.detect(x, ctx)
+        }
+        OfflineDetectorConfig::BinSeg(config) => {
+            BinSeg::new(CostL2Mean::new(repro_mode), config.clone())?.detect(x, ctx)
+        }
+        OfflineDetectorConfig::Fpop(config) => {
+            Fpop::new(CostL2Mean::new(repro_mode), config.clone())?.detect(x, ctx)
+        }
+        OfflineDetectorConfig::Wbs(config) => {
+            Wbs::new(CostL2Mean::new(repro_mode), config.clone())?.detect(x, ctx)
+        }
     }
 }
 
@@ -1325,6 +1370,22 @@ fn pipeline_with_scaled_penalty(
             Ok(Some(PipelineSpec::from_pipeline_config(
                 &PipelineConfig::Offline {
                     detector: OfflineDetectorConfig::BinSeg(scaled),
+                    cost,
+                    constraints: constraints.clone(),
+                },
+            )))
+        }
+        OfflineDetectorConfig::Fpop(config) => {
+            let Some(stopping) =
+                scaled_stopping(&config.stopping, scale, n, d, config.params_per_segment)?
+            else {
+                return Ok(None);
+            };
+            let mut scaled = config.clone();
+            scaled.stopping = stopping;
+            Ok(Some(PipelineSpec::from_pipeline_config(
+                &PipelineConfig::Offline {
+                    detector: OfflineDetectorConfig::Fpop(scaled),
                     cost,
                     constraints: constraints.clone(),
                 },
@@ -2535,21 +2596,21 @@ fn build_offline_candidates(
         let constraints = apply_jump_thinning(base_constraints, x.n, true);
         let candidate = Candidate {
             pipeline: PipelineConfig::Offline {
-                detector: OfflineDetectorConfig::Pelt(PeltConfig::default()),
+                detector: OfflineDetectorConfig::Fpop(FpopConfig::default()),
                 cost: OfflineCostKind::L2,
                 constraints,
             },
             pipeline_id: format!(
-                "offline:pelt:l2:jump={}",
+                "offline:fpop:l2:jump={}",
                 apply_jump_thinning(base_constraints, x.n, true).jump
             ),
             warnings: vec![],
             primary_reason:
-                "default large-n offline path uses PELT+L2 with jump thinning for speed".to_string(),
+                "default large-n offline path uses FPOP+L2 with jump thinning for speed".to_string(),
             driver_keys: vec!["change_density_score", "regime_change_proxy", "nan_rate"],
             profile: PerformanceProfile {
-                speed: 0.90,
-                accuracy: 0.72,
+                speed: 0.92,
+                accuracy: 0.73,
                 robustness: 0.55,
             },
             family: CandidateFamily::Generic,
@@ -2647,25 +2708,24 @@ fn build_offline_candidates(
         }
 
         if flags.change_dense {
-            let pelt_candidate = Candidate {
+            let fpop_candidate = Candidate {
                 pipeline: PipelineConfig::Offline {
-                    detector: OfflineDetectorConfig::Pelt(PeltConfig::default()),
+                    detector: OfflineDetectorConfig::Fpop(FpopConfig::default()),
                     cost: OfflineCostKind::L2,
                     constraints: base_constraints.clone(),
                 },
-                pipeline_id: format!("offline:pelt:l2:jump={}", base_constraints.jump),
+                pipeline_id: format!("offline:fpop:l2:jump={}", base_constraints.jump),
                 warnings: vec![],
-                primary_reason:
-                    "change-dense medium-n series benefits from stable global PELT search"
-                        .to_string(),
+                primary_reason: "change-dense medium-n series benefits from global FPOP search"
+                    .to_string(),
                 driver_keys: vec![
                     "change_density_score",
                     "regime_change_proxy",
                     "lagk_autocorr",
                 ],
                 profile: PerformanceProfile {
-                    speed: 0.90,
-                    accuracy: 0.72,
+                    speed: 0.92,
+                    accuracy: 0.73,
                     robustness: 0.55,
                 },
                 family: CandidateFamily::StrongMapped,
@@ -2673,7 +2733,7 @@ fn build_offline_candidates(
                 evidence_support: evidence_support(0.70, flags, false),
                 has_approximation_warning: false,
             };
-            push_candidate(pelt_candidate, out, seen);
+            push_candidate(fpop_candidate, out, seen);
 
             let mut wbs = WbsConfig::default();
             wbs.interval_strategy = WbsIntervalStrategy::Random;
@@ -2986,6 +3046,12 @@ fn resource_estimate(pipeline: &PipelineConfig) -> ResourceEstimate {
                     relative_time_score: 0.35,
                     relative_memory_score: 0.35,
                 },
+                OfflineDetectorConfig::Fpop(_) => ResourceEstimate {
+                    time_complexity: "O(n) avg / O(n^2) worst".to_string(),
+                    memory_complexity: "O(n)".to_string(),
+                    relative_time_score: 0.38,
+                    relative_memory_score: 0.40,
+                },
                 OfflineDetectorConfig::Wbs(_) => ResourceEstimate {
                     time_complexity: "O(M*n)".to_string(),
                     memory_complexity: "O(n + M)".to_string(),
@@ -3038,6 +3104,13 @@ fn pipeline_label(pipeline: &PipelineConfig) -> &'static str {
             (OfflineDetectorConfig::BinSeg(_), OfflineCostKind::Normal) => "BinSeg + Normal",
             (OfflineDetectorConfig::BinSeg(_), OfflineCostKind::L2) => "BinSeg + L2",
             (OfflineDetectorConfig::BinSeg(_), OfflineCostKind::Nig) => "BinSeg + NIG",
+            (OfflineDetectorConfig::Fpop(_), OfflineCostKind::L2) => "FPOP + L2",
+            (OfflineDetectorConfig::Fpop(_), OfflineCostKind::Ar)
+            | (OfflineDetectorConfig::Fpop(_), OfflineCostKind::L1Median)
+            | (OfflineDetectorConfig::Fpop(_), OfflineCostKind::Normal)
+            | (OfflineDetectorConfig::Fpop(_), OfflineCostKind::Nig) => {
+                "FPOP + non-L2 (unsupported)"
+            }
             (OfflineDetectorConfig::Wbs(_), OfflineCostKind::Ar) => "WBS + AR",
             (OfflineDetectorConfig::Wbs(_), OfflineCostKind::L1Median) => "WBS + L1 median",
             (OfflineDetectorConfig::Wbs(_), OfflineCostKind::L2) => "WBS + L2",
@@ -3237,6 +3310,7 @@ fn pipeline_id(pipeline: &PipelineConfig) -> String {
             let detector_name = match detector {
                 OfflineDetectorConfig::Pelt(_) => "pelt",
                 OfflineDetectorConfig::BinSeg(_) => "binseg",
+                OfflineDetectorConfig::Fpop(_) => "fpop",
                 OfflineDetectorConfig::Wbs(_) => "wbs",
             };
             let cost_name = match cost {
@@ -3362,6 +3436,7 @@ mod tests {
                 detectors.insert(match detector {
                     OfflineDetectorConfig::Pelt(_) => "pelt",
                     OfflineDetectorConfig::BinSeg(_) => "binseg",
+                    OfflineDetectorConfig::Fpop(_) => "fpop",
                     OfflineDetectorConfig::Wbs(_) => "wbs",
                 });
                 costs.insert(match cost {
@@ -3397,7 +3472,7 @@ mod tests {
     }
 
     #[test]
-    fn recommend_offline_huge_n_prefers_pelt_l2_with_jump_thinning() {
+    fn recommend_offline_huge_n_prefers_fpop_l2_with_jump_thinning() {
         let n = 120_000;
         let mut state = 123_u64;
         let values = (0..n)
@@ -3415,7 +3490,7 @@ mod tests {
             .expect("pipeline should convert");
         match &pipeline {
             PipelineConfig::Offline {
-                detector: OfflineDetectorConfig::Pelt(_),
+                detector: OfflineDetectorConfig::Fpop(_),
                 cost: OfflineCostKind::L2,
                 constraints,
             } => {
@@ -4336,7 +4411,7 @@ mod tests {
                 .expect("short recommendation");
         collect_offline_coverage(&short_recommendations, &mut detectors, &mut costs);
 
-        let expected_detectors = ["binseg", "pelt", "wbs"]
+        let expected_detectors = ["binseg", "fpop", "pelt", "wbs"]
             .into_iter()
             .collect::<BTreeSet<_>>();
         let expected_costs = ["l1_median", "l2", "nig", "normal"]

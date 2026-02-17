@@ -137,6 +137,19 @@ class Binseg:
     ) -> OfflineChangePointResult: ...
 
 
+class Fpop:
+    def __init__(
+        self,
+        min_segment_len: int = 2,
+        jump: int = 1,
+        max_change_points: int | None = None,
+    ) -> None: ...
+    def fit(self, values: Any) -> Fpop: ...
+    def predict(
+        self, *, pen: float | None = None, n_bkps: int | None = None
+    ) -> OfflineChangePointResult: ...
+
+
 class Bocpd:
     def __init__(
         self,

@@ -12,7 +12,7 @@ use cpd_doctor::{
     recommend,
 };
 use cpd_eval::{offline_metrics, online_metrics};
-use cpd_offline::{BinSegConfig, PeltConfig, WbsConfig, WbsIntervalStrategy};
+use cpd_offline::{BinSegConfig, FpopConfig, PeltConfig, WbsConfig, WbsIntervalStrategy};
 use serde::Serialize;
 use serde_json::{Map, Value};
 use std::env;
@@ -124,6 +124,7 @@ impl Default for EvalArgs {
 enum AlgorithmArg {
     Pelt,
     Binseg,
+    Fpop,
     Wbs,
 }
 
@@ -156,9 +157,10 @@ impl AlgorithmArg {
         match raw.to_ascii_lowercase().as_str() {
             "pelt" => Ok(Self::Pelt),
             "binseg" => Ok(Self::Binseg),
+            "fpop" => Ok(Self::Fpop),
             "wbs" => Ok(Self::Wbs),
             _ => Err(CliError::invalid_input(format!(
-                "invalid --algorithm '{raw}'; expected one of: pelt, binseg, wbs"
+                "invalid --algorithm '{raw}'; expected one of: pelt, binseg, fpop, wbs"
             ))),
         }
     }
@@ -838,7 +840,7 @@ fn print_command_help(command: &str) -> Result<(), CliError> {
     match command {
         "detect" => {
             println!(
-                "USAGE:\n  cpd detect --input <path> [OPTIONS]\n\nOPTIONS:\n  --algorithm <pelt|binseg|wbs>       Default: pelt\n  --cost <ar|l1_median|l2|normal|nig> Default: l2\n  --penalty <bic|aic|manual>          Default: bic\n  --penalty-value <float>             Required when --penalty=manual\n  --k <usize>                         Use KnownK stopping\n  --seed <u64>                        WBS seed only\n  --min-segment-len <usize>\n  --max-change-points <usize>\n  --max-depth <usize>\n  --jump <usize>\n  --input <path>                      Required (.csv or .npy)\n  --output <path>                     Write JSON output to file"
+                "USAGE:\n  cpd detect --input <path> [OPTIONS]\n\nOPTIONS:\n  --algorithm <pelt|binseg|fpop|wbs>  Default: pelt\n  --cost <ar|l1_median|l2|normal|nig> Default: l2\n  --penalty <bic|aic|manual>          Default: bic\n  --penalty-value <float>             Required when --penalty=manual\n  --k <usize>                         Use KnownK stopping\n  --seed <u64>                        WBS seed only\n  --min-segment-len <usize>\n  --max-change-points <usize>\n  --max-depth <usize>\n  --jump <usize>\n  --input <path>                      Required (.csv or .npy)\n  --output <path>                     Write JSON output to file"
             );
             Ok(())
         }
@@ -1027,6 +1029,22 @@ fn build_detect_pipeline(args: &DetectArgs) -> Result<PipelineSpec, CliError> {
             OfflineDetectorConfig::BinSeg(BinSegConfig {
                 stopping: stopping.clone(),
                 ..BinSegConfig::default()
+            })
+        }
+        AlgorithmArg::Fpop => {
+            if args.seed.is_some() {
+                return Err(CliError::invalid_input(
+                    "--seed is only supported when --algorithm=wbs",
+                ));
+            }
+            if !matches!(args.cost, CostArg::L2) {
+                return Err(CliError::invalid_input(
+                    "--algorithm=fpop requires --cost=l2",
+                ));
+            }
+            OfflineDetectorConfig::Fpop(FpopConfig {
+                stopping: stopping.clone(),
+                ..FpopConfig::default()
             })
         }
         AlgorithmArg::Wbs => {
@@ -1552,7 +1570,10 @@ fn load_pipeline_spec(path: &Path) -> Result<PipelineSpec, CliError> {
 
 fn parse_pipeline_spec_document(raw: &str) -> Result<PipelineSpec, CliError> {
     let direct_parse_error = match serde_json::from_str::<PipelineSpec>(raw) {
-        Ok(spec) => return Ok(spec),
+        Ok(spec) => {
+            validate_pipeline_spec(&spec)?;
+            return Ok(spec);
+        }
         Err(err) => err,
     };
 
@@ -1565,11 +1586,13 @@ fn parse_pipeline_spec_document(raw: &str) -> Result<PipelineSpec, CliError> {
         _ => &value,
     };
 
-    parse_simple_pipeline_spec(fallback_target).map_err(|fallback_error| {
+    let parsed = parse_simple_pipeline_spec(fallback_target).map_err(|fallback_error| {
         CliError::invalid_input(format!(
             "failed to parse pipeline spec: serde parser error: {direct_parse_error}; fallback parser error: {fallback_error}"
         ))
-    })
+    })?;
+    validate_pipeline_spec(&parsed)?;
+    Ok(parsed)
 }
 
 fn parse_simple_pipeline_spec(value: &Value) -> Result<PipelineSpec, CliError> {
@@ -1601,6 +1624,12 @@ fn parse_simple_pipeline_spec(value: &Value) -> Result<PipelineSpec, CliError> {
         ));
     }
 
+    if matches!(&detector, OfflineDetectorConfig::Fpop(_)) && !matches!(cost, CostConfig::L2) {
+        return Err(CliError::invalid_input(
+            "pipeline.detector='fpop' requires pipeline.cost='l2'",
+        ));
+    }
+
     apply_pipeline_controls(&mut detector, &stopping, seed)?;
 
     Ok(PipelineSpec {
@@ -1611,6 +1640,19 @@ fn parse_simple_pipeline_spec(value: &Value) -> Result<PipelineSpec, CliError> {
         stopping: Some(stopping),
         seed,
     })
+}
+
+fn validate_pipeline_spec(pipeline: &PipelineSpec) -> Result<(), CliError> {
+    if matches!(
+        &pipeline.detector,
+        DetectorConfig::Offline(OfflineDetectorConfig::Fpop(_))
+    ) && !matches!(pipeline.cost, CostConfig::L2)
+    {
+        return Err(CliError::invalid_input(
+            "pipeline.detector='fpop' requires pipeline.cost='l2'",
+        ));
+    }
+    Ok(())
 }
 
 fn parse_simple_detector(value: &Value) -> Result<OfflineDetectorConfig, CliError> {
@@ -1680,6 +1722,13 @@ fn parse_detector_kind(
             };
             Ok(OfflineDetectorConfig::BinSeg(config))
         }
+        "fpop" => {
+            let config = match config_dict {
+                Some(dict) => parse_fpop_config(dict, context)?,
+                None => FpopConfig::default(),
+            };
+            Ok(OfflineDetectorConfig::Fpop(config))
+        }
         "wbs" => {
             let config = match config_dict {
                 Some(dict) => parse_wbs_config(dict, context)?,
@@ -1688,7 +1737,7 @@ fn parse_detector_kind(
             Ok(OfflineDetectorConfig::Wbs(config))
         }
         _ => Err(CliError::invalid_input(format!(
-            "unsupported {context} kind '{kind}'; expected one of: 'pelt', 'binseg', 'wbs'"
+            "unsupported {context} kind '{kind}'; expected one of: 'pelt', 'binseg', 'fpop', 'wbs'"
         ))),
     }
 }
@@ -1734,6 +1783,30 @@ fn parse_binseg_config(dict: &Map<String, Value>, context: &str) -> Result<BinSe
             _ => {
                 return Err(CliError::invalid_input(format!(
                     "unsupported key '{key}' in {context} for detector kind='binseg'"
+                )));
+            }
+        }
+    }
+    Ok(config)
+}
+
+fn parse_fpop_config(dict: &Map<String, Value>, context: &str) -> Result<FpopConfig, CliError> {
+    let mut config = FpopConfig::default();
+    for (key, value) in dict {
+        match key.as_str() {
+            "kind" => {}
+            "stopping" => config.stopping = parse_pipeline_stopping_compat(value)?,
+            "params_per_segment" => {
+                config.params_per_segment =
+                    parse_usize(value, "pipeline.detector.params_per_segment")?
+            }
+            "cancel_check_every" => {
+                config.cancel_check_every =
+                    parse_usize(value, "pipeline.detector.cancel_check_every")?
+            }
+            _ => {
+                return Err(CliError::invalid_input(format!(
+                    "unsupported key '{key}' in {context} for detector kind='fpop'"
                 )));
             }
         }
@@ -2039,6 +2112,7 @@ fn detector_stopping(detector: &OfflineDetectorConfig) -> Stopping {
     match detector {
         OfflineDetectorConfig::Pelt(config) => config.stopping.clone(),
         OfflineDetectorConfig::BinSeg(config) => config.stopping.clone(),
+        OfflineDetectorConfig::Fpop(config) => config.stopping.clone(),
         OfflineDetectorConfig::Wbs(config) => config.stopping.clone(),
     }
 }
@@ -2046,7 +2120,9 @@ fn detector_stopping(detector: &OfflineDetectorConfig) -> Stopping {
 fn detector_seed(detector: &OfflineDetectorConfig) -> Option<u64> {
     match detector {
         OfflineDetectorConfig::Wbs(config) => Some(config.seed),
-        OfflineDetectorConfig::Pelt(_) | OfflineDetectorConfig::BinSeg(_) => None,
+        OfflineDetectorConfig::Pelt(_)
+        | OfflineDetectorConfig::BinSeg(_)
+        | OfflineDetectorConfig::Fpop(_) => None,
     }
 }
 
@@ -2065,6 +2141,14 @@ fn apply_pipeline_controls(
             }
         }
         OfflineDetectorConfig::BinSeg(config) => {
+            config.stopping = stopping.clone();
+            if seed.is_some() {
+                return Err(CliError::invalid_input(
+                    "pipeline.seed is only supported for detector='wbs'",
+                ));
+            }
+        }
+        OfflineDetectorConfig::Fpop(config) => {
             config.stopping = stopping.clone();
             if seed.is_some() {
                 return Err(CliError::invalid_input(
@@ -2306,8 +2390,8 @@ fn emit_structured_error(err: &CliError) {
 #[cfg(test)]
 mod tests {
     use super::{
-        parse_csv_data, parse_detect_args, parse_npy_bytes, parse_pipeline_spec_document,
-        resolve_stopping,
+        build_detect_pipeline, parse_csv_data, parse_detect_args, parse_npy_bytes,
+        parse_pipeline_spec_document, resolve_stopping,
     };
     use cpd_core::{Penalty, Stopping};
     use cpd_doctor::{CostConfig, DetectorConfig, OfflineDetectorConfig};
@@ -2431,6 +2515,81 @@ mod tests {
             pipeline.stopping,
             Some(Stopping::Penalized(Penalty::BIC))
         ));
+    }
+
+    #[test]
+    fn detect_pipeline_supports_fpop_algorithm_with_l2_cost() {
+        let tokens = vec![
+            "--input".to_string(),
+            "/tmp/series.csv".to_string(),
+            "--algorithm".to_string(),
+            "fpop".to_string(),
+            "--cost".to_string(),
+            "l2".to_string(),
+            "--k".to_string(),
+            "2".to_string(),
+        ];
+        let args = parse_detect_args(tokens.as_slice()).expect("detect args should parse");
+        let pipeline = build_detect_pipeline(&args).expect("fpop+l2 should build");
+        assert!(matches!(
+            pipeline.detector,
+            DetectorConfig::Offline(OfflineDetectorConfig::Fpop(_))
+        ));
+        assert!(matches!(pipeline.cost, CostConfig::L2));
+    }
+
+    #[test]
+    fn detect_pipeline_rejects_fpop_with_non_l2_cost() {
+        let tokens = vec![
+            "--input".to_string(),
+            "/tmp/series.csv".to_string(),
+            "--algorithm".to_string(),
+            "fpop".to_string(),
+            "--cost".to_string(),
+            "normal".to_string(),
+            "--k".to_string(),
+            "2".to_string(),
+        ];
+        let args = parse_detect_args(tokens.as_slice()).expect("detect args should parse");
+        let err = build_detect_pipeline(&args).expect_err("fpop+normal should fail");
+        assert!(
+            err.to_string()
+                .contains("--algorithm=fpop requires --cost=l2"),
+            "unexpected error message: {err}"
+        );
+    }
+
+    #[test]
+    fn pipeline_parser_accepts_fpop_with_l2_cost() {
+        let raw = r#"
+        {
+          "detector": {"kind": "fpop"},
+          "cost": "l2",
+          "stopping": {"n_bkps": 2}
+        }
+        "#;
+        let pipeline = parse_pipeline_spec_document(raw).expect("pipeline should parse");
+        assert!(matches!(
+            pipeline.detector,
+            DetectorConfig::Offline(OfflineDetectorConfig::Fpop(_))
+        ));
+    }
+
+    #[test]
+    fn pipeline_parser_rejects_fpop_with_non_l2_cost() {
+        let raw = r#"
+        {
+          "detector": {"kind": "fpop"},
+          "cost": "normal",
+          "stopping": {"n_bkps": 2}
+        }
+        "#;
+        let err = parse_pipeline_spec_document(raw).expect_err("fpop+normal should fail");
+        assert!(
+            err.to_string()
+                .contains("pipeline.detector='fpop' requires pipeline.cost='l2'"),
+            "unexpected error message: {err}"
+        );
     }
 
     #[test]

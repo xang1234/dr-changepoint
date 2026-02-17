@@ -30,6 +30,7 @@ def main() -> int:
 
     pelt = cpd.Pelt(model="l2", min_segment_len=2).fit(values).predict(n_bkps=2)
     binseg = cpd.Binseg(model="l2", min_segment_len=2).fit(values).predict(n_bkps=2)
+    fpop = cpd.Fpop(min_segment_len=2).fit(values).predict(n_bkps=2)
     low = cpd.detect_offline(
         values,
         detector="pelt",
@@ -41,6 +42,7 @@ def main() -> int:
 
     print("pelt breakpoints:", pelt.breakpoints)
     print("binseg breakpoints:", binseg.breakpoints)
+    print("fpop breakpoints:", fpop.breakpoints)
     print("detect_offline breakpoints:", low.breakpoints)
     print("detect_offline diagnostics.algorithm:", low.diagnostics.algorithm)
     print("detect_offline diagnostics.cost_model:", low.diagnostics.cost_model)

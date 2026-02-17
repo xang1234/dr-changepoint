@@ -28,9 +28,11 @@ x = np.concatenate([
 
 pelt_result = cpd.Pelt(model="l2", min_segment_len=2).fit(x).predict(n_bkps=2)
 binseg_result = cpd.Binseg(model="l2", min_segment_len=2).fit(x).predict(n_bkps=2)
+fpop_result = cpd.Fpop(min_segment_len=2).fit(x).predict(n_bkps=2)
 
 print("PELT breakpoints:", pelt_result.breakpoints)
 print("BinSeg breakpoints:", binseg_result.breakpoints)
+print("FPOP breakpoints:", fpop_result.breakpoints)
 ```
 
 Expected breakpoints:

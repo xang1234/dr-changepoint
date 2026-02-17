@@ -19,20 +19,23 @@ def _three_regime_signal() -> np.ndarray:
 def test_import_surface_exposes_mvp_a_api() -> None:
     assert hasattr(cpd, "Pelt")
     assert hasattr(cpd, "Binseg")
+    assert hasattr(cpd, "Fpop")
     assert hasattr(cpd, "detect_offline")
 
 
-def test_pelt_and_binseg_detect_known_breakpoints() -> None:
+def test_pelt_binseg_and_fpop_detect_known_breakpoints() -> None:
     x = _three_regime_signal()
 
     pelt = cpd.Pelt(model="l2", min_segment_len=2).fit(x).predict(n_bkps=2)
     binseg = cpd.Binseg(model="l2", min_segment_len=2).fit(x).predict(n_bkps=2)
+    fpop = cpd.Fpop(min_segment_len=2).fit(x).predict(n_bkps=2)
 
     assert pelt.breakpoints == [40, 80, 120]
     assert binseg.breakpoints == [40, 80, 120]
+    assert fpop.breakpoints == [40, 80, 120]
 
 
-def test_detect_offline_matches_class_api_for_pelt_and_binseg() -> None:
+def test_detect_offline_matches_class_api_for_pelt_binseg_and_fpop() -> None:
     x = _three_regime_signal()
 
     pelt_class = cpd.Pelt(model="l2", min_segment_len=2).fit(x).predict(n_bkps=2)
@@ -55,8 +58,19 @@ def test_detect_offline_matches_class_api_for_pelt_and_binseg() -> None:
         repro_mode="balanced",
     )
 
+    fpop_class = cpd.Fpop(min_segment_len=2).fit(x).predict(n_bkps=2)
+    fpop_low = cpd.detect_offline(
+        x,
+        detector="fpop",
+        cost="l2",
+        constraints={"min_segment_len": 2},
+        stopping={"n_bkps": 2},
+        repro_mode="balanced",
+    )
+
     assert pelt_low.breakpoints == pelt_class.breakpoints
     assert binseg_low.breakpoints == binseg_class.breakpoints
+    assert fpop_low.breakpoints == fpop_class.breakpoints
 
 
 def test_detect_offline_accepts_pipeline_spec() -> None:
@@ -184,6 +198,9 @@ def test_detect_offline_rejects_invalid_parameters() -> None:
             pipeline={"detector": "pelt", "stopping": {"n_bkps": 2}},
             detector="binseg",
         )
+
+    with pytest.raises(ValueError, match="requires cost='l2'"):
+        cpd.detect_offline(x, detector="fpop", cost="normal", stopping={"n_bkps": 2})
 
 
 def test_detect_offline_rejects_preprocess_without_feature() -> None:

@@ -23,8 +23,8 @@ use cpd_doctor::{
     execute_pipeline_with_repro_mode as execute_doctor_pipeline_with_repro_mode,
 };
 use cpd_offline::{
-    BinSeg as OfflineBinSeg, BinSegConfig, Pelt as OfflinePelt, PeltConfig, WbsConfig,
-    WbsIntervalStrategy,
+    BinSeg as OfflineBinSeg, BinSegConfig, Fpop as OfflineFpop, FpopConfig, Pelt as OfflinePelt,
+    PeltConfig, WbsConfig, WbsIntervalStrategy,
 };
 use cpd_online::{
     AlertPolicy, BocpdConfig, BocpdDetector, BocpdState, ConstantHazard, CusumConfig,
@@ -209,6 +209,7 @@ impl PyCostModel {
 enum PyDetectorKind {
     Pelt,
     Binseg,
+    Fpop,
 }
 
 impl PyDetectorKind {
@@ -216,8 +217,9 @@ impl PyDetectorKind {
         match detector.to_ascii_lowercase().as_str() {
             "pelt" => Ok(Self::Pelt),
             "binseg" => Ok(Self::Binseg),
+            "fpop" => Ok(Self::Fpop),
             _ => Err(PyValueError::new_err(format!(
-                "unsupported detector '{detector}'; expected one of: 'pelt', 'binseg'"
+                "unsupported detector '{detector}'; expected one of: 'pelt', 'binseg', 'fpop'"
             ))),
         }
     }
@@ -1108,6 +1110,27 @@ fn parse_pipeline_binseg_config(dict: &Bound<'_, PyDict>, context: &str) -> PyRe
     Ok(config)
 }
 
+fn parse_pipeline_fpop_config(dict: &Bound<'_, PyDict>, context: &str) -> PyResult<FpopConfig> {
+    let mut config = FpopConfig::default();
+    for (key_obj, value_obj) in dict.iter() {
+        let key: String = key_obj
+            .extract()
+            .map_err(|_| PyTypeError::new_err(format!("{context} keys must be strings")))?;
+        match key.as_str() {
+            "kind" => {}
+            "stopping" => config.stopping = parse_pipeline_stopping_compat(Some(&value_obj))?,
+            "params_per_segment" => config.params_per_segment = value_obj.extract::<usize>()?,
+            "cancel_check_every" => config.cancel_check_every = value_obj.extract::<usize>()?,
+            _ => {
+                return Err(PyValueError::new_err(format!(
+                    "unsupported {context} key '{key}' for detector kind='fpop'"
+                )));
+            }
+        }
+    }
+    Ok(config)
+}
+
 fn parse_pipeline_wbs_config(dict: &Bound<'_, PyDict>, context: &str) -> PyResult<WbsConfig> {
     let mut config = WbsConfig::default();
     for (key_obj, value_obj) in dict.iter() {
@@ -1154,6 +1177,12 @@ fn parse_pipeline_detector_kind(
             )),
             None => Ok(DoctorOfflineDetectorConfig::BinSeg(BinSegConfig::default())),
         },
+        "fpop" => match dict {
+            Some(dict) => Ok(DoctorOfflineDetectorConfig::Fpop(
+                parse_pipeline_fpop_config(dict, "pipeline.detector")?,
+            )),
+            None => Ok(DoctorOfflineDetectorConfig::Fpop(FpopConfig::default())),
+        },
         "wbs" => match dict {
             Some(dict) => Ok(DoctorOfflineDetectorConfig::Wbs(parse_pipeline_wbs_config(
                 dict,
@@ -1162,7 +1191,7 @@ fn parse_pipeline_detector_kind(
             None => Ok(DoctorOfflineDetectorConfig::Wbs(WbsConfig::default())),
         },
         _ => Err(PyValueError::new_err(format!(
-            "unsupported pipeline.detector.kind '{kind}'; expected one of: 'pelt', 'binseg', 'wbs'"
+            "unsupported pipeline.detector.kind '{kind}'; expected one of: 'pelt', 'binseg', 'fpop', 'wbs'"
         ))),
     }
 }
@@ -1185,7 +1214,7 @@ fn parse_pipeline_detector_serde(
             .map_err(|_| PyTypeError::new_err("pipeline.detector['Offline'] must be a dict"))?;
         if offline.len() != 1 {
             return Err(PyValueError::new_err(
-                "pipeline.detector['Offline'] must contain exactly one key: 'Pelt', 'BinSeg', or 'Wbs'",
+                "pipeline.detector['Offline'] must contain exactly one key: 'Pelt', 'BinSeg', 'Fpop', or 'Wbs'",
             ));
         }
 
@@ -1208,12 +1237,15 @@ fn parse_pipeline_detector_serde(
             "binseg" => Ok(DoctorOfflineDetectorConfig::BinSeg(
                 parse_pipeline_binseg_config(&config, "pipeline.detector['Offline']['BinSeg']")?,
             )),
+            "fpop" => Ok(DoctorOfflineDetectorConfig::Fpop(
+                parse_pipeline_fpop_config(&config, "pipeline.detector['Offline']['Fpop']")?,
+            )),
             "wbs" => Ok(DoctorOfflineDetectorConfig::Wbs(parse_pipeline_wbs_config(
                 &config,
                 "pipeline.detector['Offline']['Wbs']",
             )?)),
             _ => Err(PyValueError::new_err(format!(
-                "unsupported pipeline.detector['Offline'] variant '{variant}'; expected one of: 'Pelt', 'BinSeg', 'Wbs'"
+                "unsupported pipeline.detector['Offline'] variant '{variant}'; expected one of: 'Pelt', 'BinSeg', 'Fpop', 'Wbs'"
             ))),
         };
     }
@@ -1252,6 +1284,7 @@ fn pipeline_detector_stopping(detector: &DoctorOfflineDetectorConfig) -> Stoppin
     match detector {
         DoctorOfflineDetectorConfig::Pelt(config) => config.stopping.clone(),
         DoctorOfflineDetectorConfig::BinSeg(config) => config.stopping.clone(),
+        DoctorOfflineDetectorConfig::Fpop(config) => config.stopping.clone(),
         DoctorOfflineDetectorConfig::Wbs(config) => config.stopping.clone(),
     }
 }
@@ -1259,7 +1292,9 @@ fn pipeline_detector_stopping(detector: &DoctorOfflineDetectorConfig) -> Stoppin
 fn pipeline_detector_seed(detector: &DoctorOfflineDetectorConfig) -> Option<u64> {
     match detector {
         DoctorOfflineDetectorConfig::Wbs(config) => Some(config.seed),
-        DoctorOfflineDetectorConfig::Pelt(_) | DoctorOfflineDetectorConfig::BinSeg(_) => None,
+        DoctorOfflineDetectorConfig::Pelt(_)
+        | DoctorOfflineDetectorConfig::BinSeg(_)
+        | DoctorOfflineDetectorConfig::Fpop(_) => None,
     }
 }
 
@@ -1278,6 +1313,14 @@ fn apply_pipeline_controls(
             }
         }
         DoctorOfflineDetectorConfig::BinSeg(config) => {
+            config.stopping = stopping.clone();
+            if seed.is_some() {
+                return Err(PyValueError::new_err(
+                    "pipeline.seed is only supported for detector='wbs'",
+                ));
+            }
+        }
+        DoctorOfflineDetectorConfig::Fpop(config) => {
             config.stopping = stopping.clone();
             if seed.is_some() {
                 return Err(PyValueError::new_err(
@@ -1655,6 +1698,18 @@ fn detect_with_view(
             let detector = OfflineBinSeg::new(CostNormalMeanVar::new(repro_mode), config)?;
             detector.detect(view, &ctx)
         }
+        (PyDetectorKind::Fpop, PyCostModel::L2) => {
+            let config = FpopConfig {
+                stopping,
+                params_per_segment: 2,
+                cancel_check_every: 1000,
+            };
+            let detector = OfflineFpop::new(CostL2Mean::new(repro_mode), config)?;
+            detector.detect(view, &ctx)
+        }
+        (PyDetectorKind::Fpop, PyCostModel::L1Median | PyCostModel::Normal) => Err(
+            CpdError::invalid_input("detector='fpop' requires cost='l2'"),
+        ),
     }
 }
 
@@ -1904,6 +1959,98 @@ impl PyBinseg {
             self.jump,
             self.max_change_points,
             self.max_depth,
+            self.fitted.is_some()
+        )
+    }
+}
+
+/// High-level ruptures-like Python interface for offline FPOP detection.
+#[pyclass(module = "cpd._cpd_rs", name = "Fpop")]
+#[derive(Clone, Debug)]
+pub struct PyFpop {
+    min_segment_len: usize,
+    jump: usize,
+    max_change_points: Option<usize>,
+    fitted: Option<OwnedSeries>,
+}
+
+#[pymethods]
+impl PyFpop {
+    #[new]
+    #[pyo3(signature = (min_segment_len = 2, jump = 1, max_change_points = None))]
+    fn new(
+        min_segment_len: usize,
+        jump: usize,
+        max_change_points: Option<usize>,
+    ) -> PyResult<Self> {
+        if min_segment_len == 0 {
+            return Err(PyValueError::new_err("min_segment_len must be >= 1; got 0"));
+        }
+        if jump == 0 {
+            return Err(PyValueError::new_err("jump must be >= 1; got 0"));
+        }
+
+        Ok(Self {
+            min_segment_len,
+            jump,
+            max_change_points,
+            fitted: None,
+        })
+    }
+
+    fn fit<'py>(
+        mut slf: PyRefMut<'py, Self>,
+        py: Python<'py>,
+        x: &Bound<'py, PyAny>,
+    ) -> PyResult<PyRefMut<'py, Self>> {
+        slf.fitted = Some(parse_owned_series(py, x)?);
+        Ok(slf)
+    }
+
+    #[pyo3(signature = (*, pen = None, n_bkps = None))]
+    fn predict(
+        &self,
+        py: Python<'_>,
+        pen: Option<f64>,
+        n_bkps: Option<usize>,
+    ) -> PyResult<PyOfflineChangePointResult> {
+        let stopping = resolve_stopping(pen, n_bkps, "predict()")?;
+        let fitted = self.fitted.as_ref().ok_or_else(|| {
+            PyRuntimeError::new_err("fit(...) must be called before predict(...)")
+        })?;
+        let constraints = Constraints {
+            min_segment_len: self.min_segment_len,
+            jump: self.jump,
+            max_change_points: self.max_change_points,
+            ..Constraints::default()
+        };
+
+        let mut result = py
+            .allow_threads(|| {
+                detect_with_spec(
+                    PyDetectorKind::Fpop,
+                    PyCostModel::L2,
+                    fitted,
+                    &constraints,
+                    stopping,
+                    ReproMode::Balanced,
+                )
+            })
+            .map_err(cpd_error_to_pyerr)?;
+
+        for note in fitted.diagnostics() {
+            result.diagnostics.notes.push(format!("fit: {note}"));
+        }
+
+        Ok(result.into())
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "Fpop(min_segment_len={}, jump={}, max_change_points={:?}, fitted={})",
+            self.min_segment_len,
+            self.jump,
+            self.max_change_points,
             self.fitted.is_some()
         )
     }
@@ -2547,6 +2694,7 @@ fn _cpd_rs(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<PyOnlineStepResult>()?;
     module.add_class::<PyPelt>()?;
     module.add_class::<PyBinseg>()?;
+    module.add_class::<PyFpop>()?;
     module.add_class::<PyBocpd>()?;
     module.add_class::<PyCusum>()?;
     module.add_class::<PyPageHinkley>()?;
@@ -2562,7 +2710,7 @@ fn _cpd_rs(module: &Bound<'_, PyModule>) -> PyResult<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        _cpd_rs, PyBinseg, PyPelt, SmokeDetector, UPDATE_MANY_GIL_RELEASE_MIN_WORK_ITEMS,
+        _cpd_rs, PyBinseg, PyFpop, PyPelt, SmokeDetector, UPDATE_MANY_GIL_RELEASE_MIN_WORK_ITEMS,
         should_release_gil_for_update_many, smoke_detect,
     };
     use pyo3::Python;
@@ -2665,6 +2813,7 @@ mod tests {
                 .expect("OnlineStepResult should be exported");
             module.getattr("Pelt").expect("Pelt should be exported");
             module.getattr("Binseg").expect("Binseg should be exported");
+            module.getattr("Fpop").expect("Fpop should be exported");
             module.getattr("Bocpd").expect("Bocpd should be exported");
             module.getattr("Cusum").expect("Cusum should be exported");
             module
@@ -2763,6 +2912,57 @@ mod tests {
                 .extract()
                 .expect("breakpoints should extract as Vec[usize]");
             assert_eq!(breakpoints, vec![5, 10]);
+        });
+    }
+
+    #[test]
+    fn fpop_fit_predict_penalized_roundtrip() {
+        with_python(|py| {
+            let module = PyModule::new(py, "_cpd_rs").expect("module should be created");
+            _cpd_rs(&module).expect("module registration should succeed");
+
+            let locals = PyDict::new(py);
+            locals
+                .set_item("cpd_rs", &module)
+                .expect("locals should accept module");
+            run_python(
+                py,
+                "import numpy as np\nresult = cpd_rs.Fpop(min_segment_len=2).fit(np.array([0.,0.,0.,0.,0.,10.,10.,10.,10.,10.], dtype=np.float64)).predict(pen=1.0)",
+                None,
+                Some(&locals),
+            )
+            .expect("fpop penalized call should succeed");
+
+            let result = locals
+                .get_item("result")
+                .expect("locals lookup should succeed")
+                .expect("result should exist");
+            let breakpoints: Vec<usize> = result
+                .getattr("breakpoints")
+                .expect("breakpoints attribute should exist")
+                .extract()
+                .expect("breakpoints should extract as Vec[usize]");
+            assert_eq!(breakpoints, vec![5, 10]);
+        });
+    }
+
+    #[test]
+    fn fpop_rejects_non_l2_cost_in_detect_offline() {
+        with_python(|py| {
+            let module = PyModule::new(py, "_cpd_rs").expect("module should be created");
+            _cpd_rs(&module).expect("module registration should succeed");
+
+            let locals = PyDict::new(py);
+            locals
+                .set_item("cpd_rs", &module)
+                .expect("locals should accept module");
+            run_python(
+                py,
+                "import numpy as np\nx = np.array([0.,0.,0.,0.,10.,10.,10.,10.], dtype=np.float64)\ntry:\n    cpd_rs.detect_offline(x, detector='fpop', cost='normal', stopping={'n_bkps': 1})\n    raise AssertionError('expected fpop non-l2 rejection')\nexcept ValueError as exc:\n    assert \"requires cost='l2'\" in str(exc)",
+                None,
+                Some(&locals),
+            )
+            .expect("fpop should reject non-l2 cost");
         });
     }
 
@@ -3076,6 +3276,19 @@ mod tests {
                 PyBinseg::new("bad-model", 2, 1, None, None).expect_err("invalid model must fail");
             assert!(err.is_instance_of::<PyValueError>(py));
             assert!(err.to_string().contains("unsupported model"));
+        });
+    }
+
+    #[test]
+    fn fpop_rejects_invalid_constructor_values() {
+        with_python(|py| {
+            let min_seg_err = PyFpop::new(0, 1, None).expect_err("min_segment_len=0 must fail");
+            assert!(min_seg_err.is_instance_of::<PyValueError>(py));
+            assert!(min_seg_err.to_string().contains("min_segment_len"));
+
+            let jump_err = PyFpop::new(2, 0, None).expect_err("jump=0 must fail");
+            assert!(jump_err.is_instance_of::<PyValueError>(py));
+            assert!(jump_err.to_string().contains("jump"));
         });
     }
 

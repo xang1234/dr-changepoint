@@ -24,6 +24,7 @@ def test_mvp_a_high_level_and_low_level_smoke() -> None:
 
     pelt = cpd.Pelt(model="l2").fit(values).predict(n_bkps=1)
     binseg = cpd.Binseg(model="l2").fit(values).predict(n_bkps=1)
+    fpop = cpd.Fpop().fit(values).predict(n_bkps=1)
     low = cpd.detect_offline(
         values,
         detector="pelt",
@@ -33,6 +34,7 @@ def test_mvp_a_high_level_and_low_level_smoke() -> None:
 
     assert pelt.breakpoints == [50, 100]
     assert binseg.breakpoints == [50, 100]
+    assert fpop.breakpoints == [50, 100]
     assert low.breakpoints == [50, 100]
     assert low.change_points == [50]
     assert low.diagnostics.algorithm == "pelt"
