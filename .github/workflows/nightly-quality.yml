@@ -344,3 +344,68 @@ jobs:
           name: nightly-ruptures-parity-report
           path: cpd/parity-report.json
           if-no-files-found: error
+
+  python-bocpd-bayesian-parity-full:
+    name: python-bocpd-bayesian-parity-full
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: bash
+        working-directory: cpd/python
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Cache Rust artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: cpd
+
+      - name: Build and install Python extension
+        run: |
+          python -m pip install --upgrade pip maturin numpy pytest
+          maturin build --release --interpreter python
+          python - <<'PY'
+          from pathlib import Path
+          import subprocess
+          import sys
+
+          wheels = sorted(Path("../target/wheels").glob("changepoint_doctor-*.whl"))
+          if len(wheels) != 1:
+              raise SystemExit(
+                  f"expected exactly one changepoint-doctor wheel, found {len(wheels)}: {[str(w) for w in wheels]}"
+              )
+          subprocess.check_call(
+              [sys.executable, "-m", "pip", "install", "--force-reinstall", str(wheels[0])]
+          )
+          PY
+
+      - name: Install pinned Bayesian reference dependency
+        run: |
+          python -m pip install \
+            "git+https://github.com/hildensia/bayesian_changepoint_detection.git@f3f8f03af0de7f4f98bd54c7ca0b5f6d0b0f6f8c"
+
+      - name: Run BOCPD parity harness unit tests
+        run: pytest -q tests/test_bocpd_bayesian_parity_harness.py
+
+      - name: Run BOCPD Bayesian parity full profile
+        env:
+          CPD_BOCPD_PARITY_PROFILE: full
+          CPD_BOCPD_PARITY_REPORT_OUT: ../bocpd-parity-report.json
+        run: pytest -q tests/test_bocpd_bayesian_parity.py
+
+      - name: Upload BOCPD Bayesian parity report
+        uses: actions/upload-artifact@v4
+        with:
+          name: nightly-bocpd-bayesian-parity-report
+          path: cpd/bocpd-parity-report.json
+          if-no-files-found: error

@@ -1,0 +1,231 @@
+{
+  "manifest_version": 1,
+  "suite": "cpd_bocpd_bayesian_parity",
+  "description": "Curated BOCPD parity corpus for cpd-rs vs bayesian_changepoint_detection (Gaussian/constant hazard).",
+  "cases": [
+    {
+      "id": "step_single_01",
+      "category": "step_single",
+      "expected_behavior": "single dominant mean shift near sample 80",
+      "signal_spec": {
+        "kind": "piecewise_constant",
+        "seed": 7100,
+        "segments": [
+          { "length": 80, "mean": 0.0 },
+          { "length": 80, "mean": 4.0 }
+        ],
+        "noise": { "distribution": "normal", "std": 0.25 }
+      },
+      "hazard_mean_run_length": 200.0,
+      "target_change_points": [80],
+      "tolerance": { "index": 10 },
+      "profile_tags": ["smoke", "full"]
+    },
+    {
+      "id": "step_single_02",
+      "category": "step_single",
+      "expected_behavior": "single dominant mean shift near sample 70",
+      "signal_spec": {
+        "kind": "piecewise_constant",
+        "seed": 7101,
+        "segments": [
+          { "length": 70, "mean": -2.0 },
+          { "length": 90, "mean": 2.5 }
+        ],
+        "noise": { "distribution": "normal", "std": 0.45 }
+      },
+      "hazard_mean_run_length": 180.0,
+      "target_change_points": [70],
+      "tolerance": { "index": 10 },
+      "profile_tags": ["smoke", "full"]
+    },
+    {
+      "id": "step_single_03",
+      "category": "step_single",
+      "expected_behavior": "single dominant mean shift near sample 90",
+      "signal_spec": {
+        "kind": "piecewise_constant",
+        "seed": 7102,
+        "segments": [
+          { "length": 90, "mean": 1.0 },
+          { "length": 70, "mean": -2.0 }
+        ],
+        "noise": { "distribution": "normal", "std": 0.30 }
+      },
+      "hazard_mean_run_length": 220.0,
+      "target_change_points": [90],
+      "tolerance": { "index": 10 },
+      "profile_tags": ["full"]
+    },
+    {
+      "id": "step_single_04",
+      "category": "step_single",
+      "expected_behavior": "single dominant mean shift near sample 60",
+      "signal_spec": {
+        "kind": "piecewise_constant",
+        "seed": 7103,
+        "segments": [
+          { "length": 60, "mean": 0.5 },
+          { "length": 100, "mean": 3.0 }
+        ],
+        "noise": { "distribution": "normal", "std": 0.50 }
+      },
+      "hazard_mean_run_length": 210.0,
+      "target_change_points": [60],
+      "tolerance": { "index": 10 },
+      "profile_tags": ["full"]
+    },
+    {
+      "id": "step_double_01",
+      "category": "step_double",
+      "expected_behavior": "two dominant mean shifts near samples 60 and 120",
+      "signal_spec": {
+        "kind": "piecewise_constant",
+        "seed": 7200,
+        "segments": [
+          { "length": 60, "mean": 0.0 },
+          { "length": 60, "mean": 3.0 },
+          { "length": 60, "mean": -1.0 }
+        ],
+        "noise": { "distribution": "normal", "std": 0.30 }
+      },
+      "hazard_mean_run_length": 200.0,
+      "target_change_points": [60, 120],
+      "tolerance": { "index": 10 },
+      "profile_tags": ["smoke", "full"]
+    },
+    {
+      "id": "step_double_02",
+      "category": "step_double",
+      "expected_behavior": "two dominant mean shifts near samples 50 and 120",
+      "signal_spec": {
+        "kind": "piecewise_constant",
+        "seed": 7201,
+        "segments": [
+          { "length": 50, "mean": -1.5 },
+          { "length": 70, "mean": 2.5 },
+          { "length": 60, "mean": 0.5 }
+        ],
+        "noise": { "distribution": "normal", "std": 0.35 }
+      },
+      "hazard_mean_run_length": 180.0,
+      "target_change_points": [50, 120],
+      "tolerance": { "index": 10 },
+      "profile_tags": ["full"]
+    },
+    {
+      "id": "step_double_03",
+      "category": "step_double",
+      "expected_behavior": "two dominant mean shifts near samples 80 and 120",
+      "signal_spec": {
+        "kind": "piecewise_constant",
+        "seed": 7202,
+        "segments": [
+          { "length": 80, "mean": 0.0 },
+          { "length": 40, "mean": 4.0 },
+          { "length": 80, "mean": 1.0 }
+        ],
+        "noise": { "distribution": "normal", "std": 0.40 }
+      },
+      "hazard_mean_run_length": 210.0,
+      "target_change_points": [80, 120],
+      "tolerance": { "index": 10 },
+      "profile_tags": ["full"]
+    },
+    {
+      "id": "step_double_04",
+      "category": "step_double",
+      "expected_behavior": "two dominant mean shifts near samples 55 and 120",
+      "signal_spec": {
+        "kind": "piecewise_constant",
+        "seed": 7203,
+        "segments": [
+          { "length": 55, "mean": 1.0 },
+          { "length": 65, "mean": -2.0 },
+          { "length": 70, "mean": 2.0 }
+        ],
+        "noise": { "distribution": "normal", "std": 0.45 }
+      },
+      "hazard_mean_run_length": 190.0,
+      "target_change_points": [55, 120],
+      "tolerance": { "index": 10 },
+      "profile_tags": ["full"]
+    },
+    {
+      "id": "autocorrelated_single_01",
+      "category": "autocorrelated_single",
+      "expected_behavior": "single dominant mean shift under AR(1) dynamics near sample 100",
+      "signal_spec": {
+        "kind": "ar1_piecewise_mean",
+        "seed": 7300,
+        "phi": 0.45,
+        "sigma": 0.8,
+        "segments": [
+          { "length": 100, "mean": 0.0 },
+          { "length": 100, "mean": 2.0 }
+        ]
+      },
+      "hazard_mean_run_length": 200.0,
+      "target_change_points": [100],
+      "tolerance": { "index": 10 },
+      "profile_tags": ["smoke", "full"]
+    },
+    {
+      "id": "autocorrelated_single_02",
+      "category": "autocorrelated_single",
+      "expected_behavior": "single dominant mean shift under AR(1) dynamics near sample 90",
+      "signal_spec": {
+        "kind": "ar1_piecewise_mean",
+        "seed": 7301,
+        "phi": 0.55,
+        "sigma": 0.9,
+        "segments": [
+          { "length": 90, "mean": -1.0 },
+          { "length": 110, "mean": 1.5 }
+        ]
+      },
+      "hazard_mean_run_length": 180.0,
+      "target_change_points": [90],
+      "tolerance": { "index": 10 },
+      "profile_tags": ["full"]
+    },
+    {
+      "id": "autocorrelated_single_03",
+      "category": "autocorrelated_single",
+      "expected_behavior": "single dominant mean shift under AR(1) dynamics near sample 120",
+      "signal_spec": {
+        "kind": "ar1_piecewise_mean",
+        "seed": 7302,
+        "phi": 0.40,
+        "sigma": 0.7,
+        "segments": [
+          { "length": 120, "mean": 0.5 },
+          { "length": 80, "mean": -1.5 }
+        ]
+      },
+      "hazard_mean_run_length": 220.0,
+      "target_change_points": [120],
+      "tolerance": { "index": 10 },
+      "profile_tags": ["full"]
+    },
+    {
+      "id": "autocorrelated_single_04",
+      "category": "autocorrelated_single",
+      "expected_behavior": "single dominant mean shift under AR(1) dynamics near sample 85",
+      "signal_spec": {
+        "kind": "ar1_piecewise_mean",
+        "seed": 7303,
+        "phi": 0.50,
+        "sigma": 1.0,
+        "segments": [
+          { "length": 85, "mean": -0.5 },
+          { "length": 115, "mean": 2.0 }
+        ]
+      },
+      "hazard_mean_run_length": 190.0,
+      "target_change_points": [85],
+      "tolerance": { "index": 10 },
+      "profile_tags": ["full"]
+    }
+  ]
+}

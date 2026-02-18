@@ -263,6 +263,21 @@ CPD_PARITY_PROFILE=full CPD_PARITY_REPORT_OUT=/tmp/cpd-parity-report.json pytest
 See [`../docs/parity_ruptures.md`](../docs/parity_ruptures.md) for corpus structure,
 tolerance rules, and CI thresholds.
 
+## BOCPD Bayesian Parity Suite
+
+To run BOCPD parity against
+`hildensia/bayesian_changepoint_detection` (pinned reference commit):
+
+```bash
+cd cpd/python
+python -m pip install "git+https://github.com/hildensia/bayesian_changepoint_detection.git@f3f8f03af0de7f4f98bd54c7ca0b5f6d0b0f6f8c"
+CPD_BOCPD_PARITY_PROFILE=smoke pytest -q tests/test_bocpd_bayesian_parity.py
+CPD_BOCPD_PARITY_PROFILE=full CPD_BOCPD_PARITY_REPORT_OUT=/tmp/cpd-bocpd-parity-report.json pytest -q tests/test_bocpd_bayesian_parity.py
+```
+
+See [`../docs/parity_bocpd_bayesian.md`](../docs/parity_bocpd_bayesian.md) for
+comparison logic, corpus layout, and threshold gates.
+
 ## Wheel CI Policy
 
 Cross-platform wheel hardening is enforced by
